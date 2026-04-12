@@ -1,0 +1,29 @@
+# Credentials — NEVER bake into the image; injected at runtime via docker-compose env_file
+.env
+
+# Python byte-code and caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Dev tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Editor artefacts
+.vscode/
+.idea/
+*.DS_Store
+
+# Git
+.git/
+.gitignore
