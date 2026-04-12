@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -6,13 +7,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import Base, engine
 from app.api.v1.endpoints.health import router as health_router
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create all tables that don't exist yet on every cold start.
-    # Supabase already has the schema once migrations run, but create_all
-    # is idempotent and safe to call repeatedly.
-    Base.metadata.create_all(bind=engine)
+    # create_all is idempotent — safe to call on every cold start.
+    # Wrapped in try/except so a transient DB blip does not kill the process;
+    # the app will still boot and serve requests, but DB ops will fail until
+    # connectivity is restored.
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database schema verified / tables created.")
+    except Exception as exc:
+        logger.warning(
+            "Startup create_all failed — check DATABASE_URL. "
+            "App will continue but DB operations will error until fixed. "
+            f"Detail: {exc}"
+        )
     yield
 
 
