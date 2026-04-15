@@ -28,7 +28,7 @@ okhttp                  = "4.12.0"
 securityCrypto          = "1.1.0-alpha06"
 
 # Nordic BLE (GATT fallback when SDK is insufficient)
-nordicBle               = "2.8.1"
+nordicBle               = "2.7.1"
 
 [libraries]
 # Core
