@@ -18,7 +18,7 @@ navigationCompose       = "2.8.5"
 room                    = "2.6.1"
 
 # WorkManager
-workManager             = "2.10.0"
+workManager             = "2.9.1"
 
 # Networking
 retrofit                = "2.11.0"
