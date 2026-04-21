@@ -9,9 +9,8 @@
         xmlns:tools="http://schemas.android.com/tools" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-    <!-- Legacy BLE scanning gate for API 26–30 -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
-        android:maxSdkVersion="30" />
+    <!-- Required for BLE scanning on all versions; Samsung API 31+ also needs this -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
     <!-- WorkManager sync requires network -->
     <uses-permission android:name="android.permission.INTERNET" />

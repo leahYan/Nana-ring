@@ -4,8 +4,9 @@ import android.content.Context
 import androidx.work.Configuration
 import com.nanaring.app.data.local.RingDatabase
 import com.nanaring.app.data.remote.RingApiService
-import com.nanaring.app.data.repository.MockRingDataSource
+import com.nanaring.app.data.repository.PhysicalRingDataSource
 import com.nanaring.app.data.repository.RingRepository
+// MockRingDataSource has been removed — no fake/mock data sources permitted (PROJECT_OVERVIEW §2)
 import com.nanaring.app.sync.SyncWorkerFactory
 import com.nanaring.app.util.AuthManager
 import okhttp3.OkHttpClient
@@ -54,9 +55,13 @@ class AppContainer(context: Context) {
         return service
     }
 
-    // Repository — uses MockRingDataSource for emulator testing.
-    // Swap to PhysicalRingDataSource when the physical ring is available.
-    val ringRepository: RingRepository = MockRingDataSource(database.heartRateDao())
+    // Repository — PhysicalRingDataSource is the only permitted implementation.
+    // All health data must originate from the physical ring via the SDK.
+    val ringRepository: RingRepository = PhysicalRingDataSource(
+        context     = context,
+        application = context.applicationContext as android.app.Application,
+        heartRateDao = database.heartRateDao(),
+    )
 
     val workerFactory: SyncWorkerFactory
         get() = SyncWorkerFactory(this)

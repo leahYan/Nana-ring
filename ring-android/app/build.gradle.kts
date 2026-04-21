@@ -57,6 +57,7 @@ dependencies {
     // Core
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.activity.compose)
 
     // Compose BOM
@@ -90,4 +91,7 @@ dependencies {
 
     // Nordic BLE — GATT lifecycle fallback
     implementation(libs.nordic.ble)
+
+    // Required by qring_sdk_1.0.0.1.aar (uses LocalBroadcastManager internally)
+    implementation(libs.androidx.localbroadcastmanager)
 }

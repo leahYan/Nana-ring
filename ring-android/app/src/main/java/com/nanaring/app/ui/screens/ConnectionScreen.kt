@@ -18,12 +18,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -52,17 +55,12 @@ import com.nanaring.app.ui.theme.TextMuted
 import com.nanaring.app.ui.theme.TextPrimary
 import com.nanaring.app.ui.theme.TextSecondary
 
-sealed interface ConnectionState {
-    data object Idle : ConnectionState
-    data object Scanning : ConnectionState
-    data class Connected(val deviceName: String, val bpm: Int) : ConnectionState
-}
-
 @Composable
 fun ConnectionScreen(
     state: ConnectionState,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
+    onConnectToDevice: (mac: String) -> Unit,
     onOpenDeveloperSettings: () -> Unit,
     appVersion: String = "v1.0.0-poc",
 ) {
@@ -99,9 +97,16 @@ fun ConnectionScreen(
 
             // ---- State-specific content ----
             when (state) {
-                ConnectionState.Idle        -> IdleContent(onStartScan)
-                ConnectionState.Scanning    -> ScanningContent(onStopScan)
-                is ConnectionState.Connected -> ConnectedContent(state)
+                is ConnectionState.Idle ->
+                    IdleContent(onStartScan)
+                is ConnectionState.Scanning ->
+                    ScanningContent(onStopScan)
+                is ConnectionState.ScanResults ->
+                    ScanResultsContent(state, onStartScan, onConnectToDevice)
+                is ConnectionState.Connecting ->
+                    ConnectingContent(state)
+                is ConnectionState.Connected ->
+                    ConnectedContent(state)
             }
 
             // ---- Version string — 5× tap reveals Developer Settings ----
@@ -119,7 +124,6 @@ fun ConnectionScreen(
 @Composable
 private fun IdleContent(onStartScan: () -> Unit) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        // Ring icon placeholder
         Box(
             modifier = Modifier
                 .size(120.dp)
@@ -226,9 +230,7 @@ private fun ScanningContent(onStopScan: () -> Unit) {
                 .fillMaxWidth()
                 .height(60.dp),
             shape = RoundedCornerShape(16.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = DarkCharcoal,
-            ),
+            colors = ButtonDefaults.buttonColors(containerColor = DarkCharcoal),
         ) {
             Text(
                 text = "Cancel",
@@ -241,12 +243,167 @@ private fun ScanningContent(onStopScan: () -> Unit) {
 }
 
 // ---------------------------------------------------------------------------
-// Connected state — green status card
+// Scan results — list of real discovered devices for user selection
+// ---------------------------------------------------------------------------
+@Composable
+private fun ScanResultsContent(
+    state: ConnectionState.ScanResults,
+    onStartScan: () -> Unit,
+    onConnectToDevice: (mac: String) -> Unit,
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        if (state.devices.isEmpty()) {
+            // No rings found — show honest empty state, never fabricate results.
+            Box(
+                modifier = Modifier
+                    .size(120.dp)
+                    .background(MidnightBlue, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(text = "○", fontSize = 64.sp, color = StatusRed)
+            }
+
+            Spacer(modifier = Modifier.height(32.dp))
+
+            Text(
+                text = "No Rings Found",
+                style = MaterialTheme.typography.titleLarge,
+                color = TextPrimary,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Make sure your ring is nearby and paired to this phone.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextSecondary,
+                textAlign = TextAlign.Center,
+            )
+        } else {
+            Text(
+                text = "Select Your Ring",
+                style = MaterialTheme.typography.titleLarge,
+                color = TextPrimary,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "${state.devices.size} device${if (state.devices.size != 1) "s" else ""} found",
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextSecondary,
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.weight(1f, fill = false),
+            ) {
+                items(state.devices) { device ->
+                    DeviceRow(device = device, onConnect = { onConnectToDevice(device.mac) })
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Button(
+            onClick = onStartScan,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = AccentBlue),
+        ) {
+            Text(
+                text = "Scan Again",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = TextPrimary,
+            )
+        }
+    }
+}
+
+@Composable
+private fun DeviceRow(device: DiscoveredDevice, onConnect: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onConnect),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MidnightBlue),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column {
+                Text(
+                    text = device.name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary,
+                )
+                Text(
+                    text = device.mac,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted,
+                )
+                if (device.isLastKnown) {
+                    Text(
+                        text = "Last connected",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AccentBlue,
+                    )
+                }
+            }
+            Text(
+                text = "Connect →",
+                style = MaterialTheme.typography.labelMedium,
+                color = AccentBlue,
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connecting state — spinner while GATT handshake is in progress
+// ---------------------------------------------------------------------------
+@Composable
+private fun ConnectingContent(state: ConnectionState.Connecting) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(80.dp),
+            color = AccentBlue,
+            strokeWidth = 6.dp,
+        )
+
+        Spacer(modifier = Modifier.height(32.dp))
+
+        Text(
+            text = "Connecting…",
+            style = MaterialTheme.typography.titleLarge,
+            color = TextPrimary,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = state.deviceName,
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connected state — green status card with live BPM
 // ---------------------------------------------------------------------------
 @Composable
 private fun ConnectedContent(state: ConnectionState.Connected) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        // Status indicator
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -272,13 +429,10 @@ private fun ConnectedContent(state: ConnectionState.Connected) {
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        // Live BPM card
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MidnightBlue,
-            ),
+            colors = CardDefaults.cardColors(containerColor = MidnightBlue),
             elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
         ) {
             Column(
@@ -293,17 +447,31 @@ private fun ConnectedContent(state: ConnectionState.Connected) {
                     color = TextSecondary,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "${state.bpm}",
-                    fontSize = 72.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary,
-                )
-                Text(
-                    text = "BPM",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondary,
-                )
+                if (state.bpm > 0) {
+                    Text(
+                        text = "${state.bpm}",
+                        fontSize = 72.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary,
+                    )
+                    Text(
+                        text = "BPM",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary,
+                    )
+                } else {
+                    Text(
+                        text = "—",
+                        fontSize = 72.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextMuted,
+                    )
+                    Text(
+                        text = "Waiting for reading",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextMuted,
+                    )
+                }
             }
         }
     }

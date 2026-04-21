@@ -1,5 +1,5 @@
 [versions]
-agp                     = "8.3.2"
+agp                     = "8.9.2"
 kotlin                  = "2.0.21"
 ksp                     = "2.0.21-1.0.28"
 
@@ -33,7 +33,8 @@ nordicBle               = "2.7.1"
 [libraries]
 # Core
 androidx-core-ktx               = { group = "androidx.core",          name = "core-ktx",               version.ref = "coreKtx" }
-androidx-lifecycle-runtime-ktx  = { group = "androidx.lifecycle",     name = "lifecycle-runtime-ktx",  version.ref = "lifecycleRuntimeKtx" }
+androidx-lifecycle-runtime-ktx      = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx",      version.ref = "lifecycleRuntimeKtx" }
+androidx-lifecycle-runtime-compose  = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose",  version.ref = "lifecycleRuntimeKtx" }
 androidx-activity-compose       = { group = "androidx.activity",      name = "activity-compose",       version.ref = "activityCompose" }
 
 # Compose BOM (all compose versions aligned here)
@@ -67,6 +68,9 @@ androidx-security-crypto = { group = "androidx.security", name = "security-crypt
 
 # Nordic BLE
 nordic-ble              = { group = "no.nordicsemi.android", name = "ble", version.ref = "nordicBle" }
+
+# Required by qring_sdk_1.0.0.1.aar — it uses LocalBroadcastManager internally
+androidx-localbroadcastmanager = { group = "androidx.localbroadcastmanager", name = "localbroadcastmanager", version = "1.1.0" }
 
 [plugins]
 android-application     = { id = "com.android.application",            version.ref = "agp" }

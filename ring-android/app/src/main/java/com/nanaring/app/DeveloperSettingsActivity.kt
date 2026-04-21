@@ -19,6 +19,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,7 +75,7 @@ class DeveloperSettingsActivity : ComponentActivity() {
                             label = { Text("Server URL") },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true,
-                            colors = OutlinedTextField.nanaColors(),
+                            colors = nanaTextFieldColors(),
                         )
 
                         OutlinedTextField(
@@ -83,7 +84,7 @@ class DeveloperSettingsActivity : ComponentActivity() {
                             label = { Text("JWT Token") },
                             modifier = Modifier.fillMaxWidth(),
                             maxLines = 5,
-                            colors = OutlinedTextField.nanaColors(),
+                            colors = nanaTextFieldColors(),
                         )
 
                         Button(
@@ -107,8 +108,8 @@ class DeveloperSettingsActivity : ComponentActivity() {
     }
 }
 
-@Suppress("FunctionName")
-private fun OutlinedTextField.Companion.nanaColors() =
+@Composable
+private fun nanaTextFieldColors() =
     OutlinedTextFieldDefaults.colors(
         focusedTextColor    = TextPrimary,
         unfocusedTextColor  = TextSecondary,

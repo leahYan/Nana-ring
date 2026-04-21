@@ -31,9 +31,9 @@ class PermissionManager(private val context: Context) {
             arrayOf(
                 Manifest.permission.BLUETOOTH_SCAN,
                 Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.ACCESS_FINE_LOCATION, // Samsung devices require this even on API 31+
             )
         } else {
-            // Legacy BLE scanning gate for API 26–30
             arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }
 
