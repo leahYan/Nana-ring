@@ -16,6 +16,9 @@ import com.nanaring.app.data.local.entity.HeartRateEntity
 import com.nanaring.app.ui.screens.ConnectionState
 import com.nanaring.app.ui.screens.DiscoveredDevice
 import com.oudmon.ble.base.bluetooth.BleOperateManager
+import com.oudmon.ble.base.bluetooth.ListenerKey
+import com.oudmon.ble.base.communication.responseImpl.DeviceNotifyListener
+import com.oudmon.ble.base.communication.rsp.DeviceNotifyRsp
 import com.oudmon.ble.base.bluetooth.QCBluetoothCallbackCloneReceiver
 import com.oudmon.ble.base.communication.CommandHandle
 import com.oudmon.ble.base.communication.Constants
@@ -25,7 +28,12 @@ import com.oudmon.ble.base.communication.req.SimpleKeyReq
 import com.oudmon.ble.base.communication.rsp.BaseRspCmd
 import com.oudmon.ble.base.communication.rsp.RealTimeHeartRateRsp
 import com.oudmon.ble.base.communication.rsp.SetTimeRsp
+import com.oudmon.ble.base.communication.rsp.StartHeartRateRsp
 import com.oudmon.ble.base.communication.rsp.StopHeartRateRsp
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import com.nanaring.app.sync.SyncWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -48,12 +56,13 @@ import kotlinx.coroutines.launch
  *   "com.qc.sdk.ble.service_discovered"  → onServiceDiscovered()
  *   "com.qc.sdk.ble.characteristic_read" → onCharacteristicRead(uuid, data)
  *
- * Post-connection setup (connectStatue connected):
+ * Post-connection setup (onServiceDiscovered — ring is ready for commands here):
  *   1. SimpleKeyReq(CMD_BIND_SUCCESS)            — bind/key exchange (required first)
  *   2. CommandHandle.executeReqCmd(SetTimeReq()) — syncs clock, returns SetTimeRsp
  *      with capability flags (mSupportTemperature, mSupportHrv, etc.)
  *   3. CommandHandle.execReadCmd(getReadFmRequest()) — firmware version string
  *   4. CommandHandle.execReadCmd(getReadHwRequest()) — hardware version string
+ *   connectStatue(connected=true) fires on GATT_STATE_CONNECTED — too early for commands.
  */
 class PhysicalRingDataSource(
     private val context: Context,
@@ -75,7 +84,17 @@ class PhysicalRingDataSource(
 
     @Volatile private var connectingMac: String? = null
     @Volatile private var receiverRegistered = false
+    @Volatile private var measurementStarted = false
+    @Volatile private var isMeasuring = false
     private var scanTimeoutJob: Job? = null
+    private var measurementJob: Job? = null
+
+    // Capability flags populated from SetTimeRsp after each connection.
+    @Volatile private var supportsOneKey = false
+    @Volatile private var supportsHrv = false
+    @Volatile private var supportsSpO2 = false
+    @Volatile private var supportsBP = false
+    @Volatile private var supportsTemp = false
 
     // Known name prefixes from colmi_r02_client — rings matching these float to the top.
     private val ringNamePrefixes = setOf(
@@ -129,28 +148,18 @@ class PhysicalRingDataSource(
                 lastKnownMac = device.address
                 lastKnownName = name
 
-                val ch = CommandHandle.getInstance()
-
-                // 1. Bind — required before any data commands.
-                ch.executeReqCmdNoCallback(SimpleKeyReq(Constants.CMD_BIND_SUCCESS))
-
-                // 2. Sync ring clock; response carries capability flags.
-                ch.executeReqCmd(SetTimeReq(), object : ICommandResponse<SetTimeRsp> {
-                    override fun onDataResponse(rsp: SetTimeRsp) {
-                        // capability flags (mSupportTemperature, mSupportHrv, etc.) available here
-                    }
-                })
-
-                // 3. Read firmware / hardware version via CommandHandle.
-                ch.execReadCmd(ch.getReadFmRequest())
-                ch.execReadCmd(ch.getReadHwRequest())
-
-                _connectionState.value = ConnectionState.Connected(name, 0)
+                // Show Connected UI immediately so the user knows the GATT link is up.
+                // Commands are sent in onServiceDiscovered() when the ring is actually ready.
+                _connectionState.value = ConnectionState.Connected(name)
+                Log.d("BLE_DEBUG", "GATT connected to $name (${device.address}) — awaiting service discovery")
             } else {
+                stopPeriodicMeasurement()
+                measurementStarted = false
                 connectingMac = null
                 firmwareVersion = "unknown"
                 hardwareVersion = "unknown"
                 _connectionState.value = ConnectionState.Idle
+                Log.d("BLE_DEBUG", "GATT disconnected")
             }
         }
 
@@ -164,7 +173,33 @@ class PhysicalRingDataSource(
         }
 
         override fun onServiceDiscovered() {
-            // Characteristic reads + SetTimeReq are already sent in connectStatue().
+            // Ring is fully ready — safe to send commands now.
+            Log.d("BLE_DEBUG", "Service discovered — sending bind + SetTimeReq + FW/HW reads")
+            val ch = CommandHandle.getInstance()
+
+            // 1. Bind — required before any data commands.
+            ch.executeReqCmdNoCallback(SimpleKeyReq(Constants.CMD_BIND_SUCCESS))
+
+            // 2. Sync ring clock; response carries capability flags.
+            ch.executeReqCmd(SetTimeReq(), object : ICommandResponse<SetTimeRsp> {
+                override fun onDataResponse(rsp: SetTimeRsp) {
+                    supportsOneKey = rsp.mSupportOneKeyCheck
+                    supportsHrv    = rsp.mSupportHrv
+                    supportsSpO2   = rsp.mSupportBloodOxygen
+                    supportsBP     = rsp.mSupportBloodPressure
+                    supportsTemp   = rsp.mSupportTemperature
+                    Log.d("BLE_DEBUG", "Capabilities — oneKey=$supportsOneKey hrv=$supportsHrv spO2=$supportsSpO2 bp=$supportsBP temp=$supportsTemp")
+                    // Guard: SetTimeRsp can fire multiple times — only start once.
+                    if (!measurementStarted) {
+                        measurementStarted = true
+                        startPeriodicMeasurement()
+                    }
+                }
+            })
+
+            // 3. Read firmware / hardware version via CommandHandle.
+            ch.execReadCmd(ch.getReadFmRequest())
+            ch.execReadCmd(ch.getReadHwRequest())
         }
     }
 
@@ -318,8 +353,28 @@ class PhysicalRingDataSource(
     /**
      * Register data listeners on [BleOperateManager].
      * Called once inside the [bleManager] lazy block.
+     *
+     * Two listener types:
+     *  - addNotifyListener: fires for specific BLE command responses
+     *  - addOutDeviceListener: fires when the ring proactively pushes its own measurements
+     *    (built-in background monitoring — no command needed, fires on the ring's schedule)
      */
     private fun registerDataListeners(mgr: BleOperateManager) {
+        // Proactive listener — ring pushes data from its own background monitoring.
+        // dataType: 1=HR, 2=BP, 3=SpO2, 5=temperature, 7=sport/activity
+        mgr.addOutDeviceListener(ListenerKey.All, object : DeviceNotifyListener() {
+            override fun onDataResponse(rsp: DeviceNotifyRsp?) {
+                val r = rsp ?: return
+                if (r.status != 0) return // only accept RESULT_OK
+                Log.d("BLE_DEBUG", "proactive — dataType=${r.dataType}")
+                if (_connectionState.value !is ConnectionState.Connected) return
+                // Ring-initiated measurement: trigger a full read so we capture it.
+                when (r.dataType) {
+                    1 -> if (!isMeasuring) takeMeasurement() // HR changed
+                }
+            }
+        })
+
         // Real-time heart rate stream — CMD_REAL_TIME_HEART_RATE = 30.
         // RealTimeHeartRateRsp.heart is the live BPM shown on the connection screen.
         mgr.addNotifyListener(
@@ -327,25 +382,198 @@ class PhysicalRingDataSource(
             object : ICommandResponse<BaseRspCmd> {
                 override fun onDataResponse(rsp: BaseRspCmd) {
                     val hr = rsp as? RealTimeHeartRateRsp ?: return
-                    if (hr.heart > 0) onHeartRateSample(hr.heart, 0, "continuous")
-                }
-            }
-        )
-
-        // Manual measurement result — CMD_STOP_HEART_RATE = 106.
-        // StopHeartRateRsp.value is the BPM from a completed on-demand measurement.
-        // Also carries rri, sbp, dbp, hrv, stress, temperature, bloodOxygen.
-        mgr.addNotifyListener(
-            Constants.CMD_STOP_HEART_RATE.toInt() and 0xFF,
-            object : ICommandResponse<BaseRspCmd> {
-                override fun onDataResponse(rsp: BaseRspCmd) {
-                    val hr = rsp as? StopHeartRateRsp ?: return
-                    if (hr.errCode.toInt() == 0 && hr.value > 0) {
-                        onHeartRateSample(hr.value, hr.rri, "manual")
+                    if (hr.heart > 0) {
+                        val prev = _connectionState.value as? ConnectionState.Connected ?: return
+                        _connectionState.value = prev.copy(bpm = hr.heart)
                     }
                 }
             }
         )
+
+        // Measurement result — CMD_STOP_HEART_RATE = 106.
+        // Fired at the end of any measurement (manual, periodic, or oneClick).
+        mgr.addNotifyListener(
+            Constants.CMD_STOP_HEART_RATE.toInt() and 0xFF,
+            object : ICommandResponse<BaseRspCmd> {
+                override fun onDataResponse(rsp: BaseRspCmd) {
+                    Log.d("BLE_DEBUG", "CMD_STOP_HEART_RATE notify — type=${rsp::class.simpleName}")
+                    val hr = rsp as? StopHeartRateRsp ?: run {
+                        Log.w("BLE_DEBUG", "CMD_STOP_HEART_RATE cast failed — got ${rsp::class.simpleName}")
+                        return
+                    }
+                    Log.d("BLE_DEBUG", "StopHeartRateRsp raw — errCode=${hr.errCode} heart=${hr.heart} spO2=${hr.bloodOxygen} bp=${hr.sbp}/${hr.dbp} hrv=${hr.hrv} stress=${hr.stress} temp=${hr.temperature}")
+                    if (hr.errCode.toInt() == 0 && hr.heart > 0) {
+                        onMeasurementComplete(hr)
+                    } else {
+                        Log.w("BLE_DEBUG", "StopHeartRateRsp discarded — errCode=${hr.errCode} heart=${hr.heart}")
+                    }
+                }
+            }
+        )
+    }
+
+    private fun startPeriodicMeasurement() {
+        measurementJob?.cancel()
+        measurementJob = scope.launch {
+            while (true) {
+                takeMeasurement()
+                delay(30 * 60 * 1_000L) // 30 minutes
+            }
+        }
+    }
+
+    private fun stopPeriodicMeasurement() {
+        measurementJob?.cancel()
+        measurementJob = null
+    }
+
+    private fun takeMeasurement() {
+        if (_connectionState.value !is ConnectionState.Connected) {
+            Log.w("BLE_DEBUG", "takeMeasurement skipped — not connected")
+            return
+        }
+        if (isMeasuring) {
+            Log.w("BLE_DEBUG", "takeMeasurement skipped — already measuring")
+            return
+        }
+        isMeasuring = true
+        Log.d("BLE_DEBUG", "Taking measurement — oneKey=$supportsOneKey")
+
+        if (supportsOneKey) {
+            // Single 35 s pass — all metrics in one shot.
+            bleManager.oneClickMeasurement(object : ICommandResponse<StopHeartRateRsp> {
+                override fun onDataResponse(rsp: StopHeartRateRsp) {
+                    isMeasuring = false
+                    Log.d("BLE_DEBUG", "oneClick — errCode=${rsp.errCode} heart=${rsp.heart} spO2=${rsp.bloodOxygen} hrv=${rsp.hrv} stress=${rsp.stress} temp=${rsp.temperature}")
+                    if (rsp.errCode.toInt() == 0 && rsp.heart > 0) onMeasurementComplete(rsp)
+                }
+            }, false)
+            return
+        }
+
+        // Sequential manual measurements. The ring measures one metric at a time;
+        // HR streams live readings (~35 s), then SpO2, HRV, Temperature in sequence.
+        // Total: ~2 min. Each metric fires StartHeartRateRsp.value (unsigned byte).
+        // Temperature encoding: ring sends (temp_tenths mod 256); add 256 to recover.
+        scope.launch {
+            try {
+                var latestHr   = 0
+                var latestSpO2 = 0
+                var latestHrv  = 0
+                var latestTemp = 0f
+
+                // --- Heart Rate (35 s) ---
+                val hrCb = object : ICommandResponse<StartHeartRateRsp> {
+                    override fun onDataResponse(rsp: StartHeartRateRsp) {
+                        val v = rsp.value.toInt() and 0xFF
+                        Log.d("BLE_DEBUG", "HR stream — errCode=${rsp.errCode} type=${rsp.type} value=$v")
+                        if (rsp.errCode.toInt() == 0 && v in 30..250) {
+                            latestHr = v
+                            val prev = _connectionState.value as? ConnectionState.Connected ?: return
+                            _connectionState.value = prev.copy(bpm = v)
+                        }
+                    }
+                }
+                bleManager.manualModeHeart(hrCb, false)
+                delay(35_000)
+                bleManager.manualModeHeart(hrCb, true)
+                Log.d("BLE_DEBUG", "HR done — latestHr=$latestHr")
+                delay(1_000)
+
+                if (latestHr == 0) {
+                    Log.w("BLE_DEBUG", "HR returned 0 — aborting")
+                    return@launch
+                }
+
+                // --- Blood Oxygen (30 s) ---
+                if (supportsSpO2) {
+                    val spO2Cb = object : ICommandResponse<StartHeartRateRsp> {
+                        override fun onDataResponse(rsp: StartHeartRateRsp) {
+                            val v = rsp.value.toInt() and 0xFF
+                            Log.d("BLE_DEBUG", "SpO2 stream — errCode=${rsp.errCode} value=$v")
+                            if (rsp.errCode.toInt() == 0 && v in 70..100) latestSpO2 = v
+                        }
+                    }
+                    bleManager.manualModeSpO2(spO2Cb, false)
+                    delay(30_000)
+                    bleManager.manualModeSpO2(spO2Cb, true)
+                    Log.d("BLE_DEBUG", "SpO2 done — latestSpO2=$latestSpO2")
+                    delay(1_000)
+                }
+
+                // --- HRV (30 s) ---
+                if (supportsHrv) {
+                    val hrvCb = object : ICommandResponse<StartHeartRateRsp> {
+                        override fun onDataResponse(rsp: StartHeartRateRsp) {
+                            val v = rsp.value.toInt() and 0xFF
+                            Log.d("BLE_DEBUG", "HRV stream — errCode=${rsp.errCode} value=$v")
+                            if (rsp.errCode.toInt() == 0 && v > 0) latestHrv = v
+                        }
+                    }
+                    bleManager.manualModeHrv(hrvCb, false)
+                    delay(30_000)
+                    bleManager.manualModeHrv(hrvCb, true)
+                    Log.d("BLE_DEBUG", "HRV done — latestHrv=$latestHrv")
+                    delay(1_000)
+                }
+
+                // --- Temperature (30 s) ---
+                // Ring encodes temp as tenths-of-°C mod 256 (e.g. 36.0°C → 360 mod 256 = 104).
+                if (supportsTemp) {
+                    val tempCb = object : ICommandResponse<StartHeartRateRsp> {
+                        override fun onDataResponse(rsp: StartHeartRateRsp) {
+                            val raw = rsp.value.toInt() and 0xFF
+                            val v = (raw + 256) / 10f
+                            Log.d("BLE_DEBUG", "Temp stream — errCode=${rsp.errCode} raw=$raw decoded=${v}°C")
+                            if (rsp.errCode.toInt() == 0 && v in 30f..42f) latestTemp = v
+                        }
+                    }
+                    bleManager.manualTemperature(tempCb, false)
+                    delay(30_000)
+                    bleManager.manualTemperature(tempCb, true)
+                    Log.d("BLE_DEBUG", "Temp done — latestTemp=$latestTemp")
+                    delay(1_000)
+                }
+
+                val prev = _connectionState.value as? ConnectionState.Connected
+                _connectionState.value = ConnectionState.Connected(
+                    deviceName  = prev?.deviceName ?: (lastKnownName ?: "Ring"),
+                    bpm         = latestHr,
+                    spO2        = if (latestSpO2 > 0) latestSpO2 else prev?.spO2 ?: 0,
+                    systolic    = prev?.systolic ?: 0,
+                    diastolic   = prev?.diastolic ?: 0,
+                    hrv         = if (latestHrv > 0) latestHrv else prev?.hrv ?: 0,
+                    stress      = prev?.stress ?: 0,
+                    temperature = if (latestTemp > 0f) latestTemp else prev?.temperature ?: 0f,
+                )
+                Log.d("BLE_DEBUG", "Measurement complete — bpm=$latestHr spO2=$latestSpO2 hrv=$latestHrv temp=$latestTemp")
+
+                heartRateDao.insert(
+                    HeartRateEntity(
+                        deviceTimestamp = System.currentTimeMillis(),
+                        bpm             = latestHr,
+                        rri             = null,
+                        spO2            = latestSpO2.takeIf { it > 0 },
+                        systolic        = null,
+                        diastolic       = null,
+                        hrv             = latestHrv.takeIf { it > 0 },
+                        stress          = null,
+                        temperature     = latestTemp.takeIf { it > 0f },
+                        source          = "periodic",
+                        syncId          = java.util.UUID.randomUUID().toString(),
+                        firmwareVersion = firmwareVersion,
+                        hardwareVersion = hardwareVersion,
+                    )
+                )
+                WorkManager.getInstance(context).enqueueUniqueWork(
+                    "ring_sync",
+                    ExistingWorkPolicy.KEEP,
+                    OneTimeWorkRequestBuilder<SyncWorker>().build(),
+                )
+            } finally {
+                isMeasuring = false
+            }
+        }
     }
 
     /** Look up already-bonded rings so they appear in ScanResults even while not advertising. */
@@ -365,20 +593,45 @@ class PhysicalRingDataSource(
         }
     }
 
-    private fun onHeartRateSample(bpm: Int, rri: Int, source: String) {
-        val deviceName = (_connectionState.value as? ConnectionState.Connected)?.deviceName ?: "Ring"
-        _connectionState.value = ConnectionState.Connected(deviceName, bpm)
+    // Called only from oneClickMeasurement path — StopHeartRateRsp.heart is the HR field.
+    private fun onMeasurementComplete(rsp: StopHeartRateRsp) {
+        val prev = _connectionState.value as? ConnectionState.Connected
+        val deviceName = prev?.deviceName ?: "Ring"
+        _connectionState.value = ConnectionState.Connected(
+            deviceName  = deviceName,
+            bpm         = rsp.heart,
+            spO2        = rsp.bloodOxygen.takeIf { it > 0 } ?: prev?.spO2 ?: 0,
+            systolic    = rsp.sbp.takeIf { it > 0 } ?: prev?.systolic ?: 0,
+            diastolic   = rsp.dbp.takeIf { it > 0 } ?: prev?.diastolic ?: 0,
+            hrv         = rsp.hrv.takeIf { it > 0 } ?: prev?.hrv ?: 0,
+            stress      = rsp.stress.takeIf { it > 0 } ?: prev?.stress ?: 0,
+            temperature = rsp.temperature.takeIf { it > 0 }?.toFloat() ?: prev?.temperature ?: 0f,
+        )
+        Log.d("BLE_DEBUG", "Measurement — heart=${rsp.heart} rri=${rsp.rri} spO2=${rsp.bloodOxygen} bp=${rsp.sbp}/${rsp.dbp} hrv=${rsp.hrv} stress=${rsp.stress} temp=${rsp.temperature}")
         scope.launch {
             heartRateDao.insert(
                 HeartRateEntity(
                     deviceTimestamp = System.currentTimeMillis(),
-                    bpm             = bpm,
-                    rri             = rri,
-                    source          = source,
+                    bpm             = rsp.heart,
+                    rri             = rsp.rri.takeIf { it > 0 },
+                    spO2            = rsp.bloodOxygen.takeIf { it > 0 },
+                    systolic        = rsp.sbp.takeIf { it > 0 },
+                    diastolic       = rsp.dbp.takeIf { it > 0 },
+                    hrv             = rsp.hrv.takeIf { it > 0 },
+                    stress          = rsp.stress.takeIf { it > 0 },
+                    temperature     = rsp.temperature.takeIf { it > 0 }?.toFloat(),
+                    source          = "periodic",
                     syncId          = java.util.UUID.randomUUID().toString(),
                     firmwareVersion = firmwareVersion,
                     hardwareVersion = hardwareVersion,
                 )
+            )
+            // Enqueue sync immediately after insert — deduplicated so rapid measurements
+            // don't stack up multiple workers.
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                "ring_sync",
+                ExistingWorkPolicy.KEEP,
+                OneTimeWorkRequestBuilder<SyncWorker>().build(),
             )
         }
     }

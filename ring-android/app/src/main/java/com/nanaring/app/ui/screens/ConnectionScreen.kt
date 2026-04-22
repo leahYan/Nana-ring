@@ -408,70 +408,92 @@ private fun ConnectedContent(state: ConnectionState.Connected) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Box(
-                modifier = Modifier
-                    .size(12.dp)
-                    .background(StatusGreen, CircleShape)
-            )
-            Text(
-                text = "Connected",
-                style = MaterialTheme.typography.titleLarge,
-                color = StatusGreen,
-            )
+            Box(modifier = Modifier.size(12.dp).background(StatusGreen, CircleShape))
+            Text(text = "Connected", style = MaterialTheme.typography.titleLarge, color = StatusGreen)
         }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(text = state.deviceName, style = MaterialTheme.typography.bodyLarge, color = TextSecondary)
+        Spacer(modifier = Modifier.height(24.dp))
 
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = state.deviceName,
-            style = MaterialTheme.typography.bodyLarge,
-            color = TextSecondary,
-        )
-
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(containerColor = MidnightBlue),
-            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+        // All metrics shown immediately — "—" until first reading arrives.
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.weight(1f, fill = false),
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text(
-                    text = "Heart Rate",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondary,
+            item {
+                MetricCard(
+                    label = "Heart Rate",
+                    value = if (state.bpm > 0) "${state.bpm}" else "—",
+                    unit  = "BPM",
+                    large = true,
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                if (state.bpm > 0) {
-                    Text(
-                        text = "${state.bpm}",
-                        fontSize = 72.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary,
-                    )
-                    Text(
-                        text = "BPM",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary,
-                    )
-                } else {
-                    Text(
-                        text = "—",
-                        fontSize = 72.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = TextMuted,
-                    )
-                    Text(
-                        text = "Waiting for reading",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextMuted,
-                    )
-                }
+            }
+            item {
+                MetricCard(
+                    label = "Blood Oxygen",
+                    value = if (state.spO2 > 0) "${state.spO2}" else "—",
+                    unit  = "%",
+                )
+            }
+            item {
+                MetricCard(
+                    label = "HRV",
+                    value = if (state.hrv > 0) "${state.hrv}" else "—",
+                    unit  = "ms",
+                )
+            }
+            item {
+                MetricCard(
+                    label = "Stress",
+                    value = if (state.stress > 0) "${state.stress}" else "—",
+                    unit  = "/ 100",
+                )
+            }
+            item {
+                MetricCard(
+                    label = "Temperature",
+                    value = if (state.temperature > 0f) "%.1f".format(state.temperature) else "—",
+                    unit  = "°C",
+                )
+            }
+            if (state.systolic > 0 && state.diastolic > 0) item {
+                MetricCard(
+                    label = "Blood Pressure",
+                    value = "${state.systolic}/${state.diastolic}",
+                    unit  = "mmHg",
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MetricCard(label: String, value: String, unit: String, large: Boolean = false) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MidnightBlue),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = if (large) 20.dp else 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(text = label, style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = value,
+                    fontSize = if (large) 48.sp else 28.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary,
+                )
+                Text(
+                    text = unit,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
             }
         }
     }
