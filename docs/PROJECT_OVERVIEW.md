@@ -21,17 +21,63 @@ These rules apply to **all** components (Android, Backend, Frontend). Any AI age
 Refer to `docs/system_architecture.png` for a visual map of the data flow.
 
 - **Mobile Bridge:** Android App (Kotlin) using `libs/ring_sdk_1.0.0.1.aar`.
-- **Cloud Backend:** FastAPI (Python) hosted on Hostinger VPS (Docker).
-- **Database:** Supabase (Managed PostgreSQL) for time-series data.
+- **Cloud Sync (Primary — POC):** Android posts health data **directly** to Supabase via its REST API (`POST /rest/v1/ring_*`). No VPS needed for data ingestion. Uses `Prefer: resolution=ignore-duplicates` header for idempotent syncs against the `UNIQUE(sync_id, user_id)` constraint on each table.
+- **Cloud Backend (Admin/Dashboard):** FastAPI (Python) hosted on Hostinger VPS (Docker). Used for admin operations, CSV export, and the doctor dashboard — **not** for ring data ingestion.
+- **Database:** Supabase (Managed PostgreSQL) for time-series data, with Row Level Security (RLS) enforcing per-user data isolation.
 - **Frontend:** React + TypeScript dashboard on Vercel.
+
+### 3.1 Authentication Strategy
+
+Two authentication paths coexist:
+
+| Path | Key used | Who | Purpose |
+|---|---|---|---|
+| Android → Supabase REST | **Anon key** + user JWT | Patients | Insert own ring data, read own data |
+| FastAPI → Supabase Postgres | **DATABASE_URL** (direct) | Backend/Admin | Admin queries, CSV export, doctor-patient linking |
+| Doctor dashboard → Supabase REST | **Anon key** + doctor JWT | Doctors | Read linked patients' data via RLS |
+
+- **Anon key** is safe to embed in the APK — it can only do what RLS allows.
+- **Service role key** is used **server-side only** (FastAPI backend) for admin operations.
+- Patient data isolation is enforced by RLS policies: `user_id = auth.uid()`.
+- Doctor access is enforced by RLS + a `doctor_patient` linking table: doctors can only `SELECT` data for patients linked to them.
+
+### 3.2 JWT (JSON Web Token)
+
+Supabase Auth issues a JWT on sign-in. The token payload contains:
+- `sub` — the user's UUID (same as `auth.uid()` in RLS policies). This value is **identical regardless of which device the user signs in from**.
+- `role` — always `authenticated` for signed-in users.
+- `exp` — expiry timestamp (default 1 hour). The Android app auto-refreshes before expiry.
+
+The `sub` field is what RLS reads via `auth.uid()`. It is cryptographically signed — no client can forge another user's UUID.
 
 ## 4. Data Flow Philosophy (Offline-First)
 
 1. **Ring -> Phone:** Raw BLE data received by the SDK. The SDK's callback interfaces (e.g., `StopHeartRateRsp`, `BloodOxygenEntity`, `SleepNewProtoResp`) deliver real measurements. The app must register listeners on these callbacks and persist whatever the SDK provides.
 2. **Phone (Room):** Data must be persisted to Room SQLite _immediately_ upon receipt from SDK callbacks. Room entities must mirror the fields defined in `ring_data_dictionary.csv`.
-3. **Phone -> Cloud:** Scheduled WorkManager tasks flush `pending_uploads` to the FastAPI backend when internet is available. The payload format is defined in the `api_batch_upload` section of the data dictionary.
-4. **Cloud (Postgres):** Data is stored permanently in Supabase. Schema must match `ring_data_dictionary.csv` exactly.
-5. **Web (Dashboard):** Fetches historical data from FastAPI for visualisation. Displays "Waiting for Data" when no records exist for the selected period.
+3. **Phone -> Supabase (Direct REST):** Scheduled WorkManager tasks flush `pending_uploads` directly to the Supabase REST API (`POST /rest/v1/ring_heart_rate`, `/ring_spo2`, etc.) when internet is available. Each request carries the user's JWT in the `Authorization: Bearer <token>` header and the Supabase anon key in the `apikey` header. The `Prefer: resolution=ignore-duplicates` header ensures safe retries. **The VPS/FastAPI backend is NOT in the data ingestion path.**
+4. **Cloud (Postgres + RLS):** Data is stored permanently in Supabase. Row Level Security enforces that each user can only insert rows where `user_id` matches their JWT's `auth.uid()`. Schema must match `ring_data_dictionary.csv` exactly.
+5. **Web (Dashboard):** The doctor dashboard authenticates via Supabase Auth and reads patient data through the REST API. RLS + the `doctor_patient` linking table ensures doctors only see their assigned patients' data. Displays "Waiting for Data" when no records exist for the selected period.
+
+### 4.1 Doctor Access via `doctor_patient` Table
+
+A `doctor_patient` table links doctor UUIDs to patient UUIDs:
+
+```
+doctor_patient
+├── id              UUID PK
+├── doctor_id       UUID FK → auth.users(id)
+├── patient_id      UUID FK → auth.users(id)
+├── created_at      TIMESTAMPTZ
+└── UNIQUE(doctor_id, patient_id)
+```
+
+RLS SELECT policy on all `ring_*` tables:
+```sql
+user_id = auth.uid()                -- patient reads own data
+OR is_linked_doctor(user_id)        -- doctor reads linked patients
+```
+
+The `is_linked_doctor()` function checks `doctor_patient` for a matching `(doctor_id = auth.uid(), patient_id = user_id)` row. Only the backend (service role) can INSERT or DELETE links — clients cannot modify the linkages.
 
 ## 5. System Design Reference
 

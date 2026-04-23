@@ -4,15 +4,14 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
-private const val PREFS_FILE   = "nana_ring_auth"
-private const val KEY_JWT       = "jwt_token"
-private const val KEY_SERVER_URL = "server_url"
-private const val DEFAULT_URL   = "http://10.0.2.2/"   // Android emulator → host localhost
+private const val PREFS_FILE         = "nana_ring_auth"
+private const val KEY_ACCESS_TOKEN   = "access_token"
+private const val KEY_REFRESH_TOKEN  = "refresh_token"
+private const val KEY_USER_ID        = "user_id"
+private const val KEY_TOKEN_EXPIRY   = "token_expiry"   // epoch seconds (Long)
+private const val KEY_SERVER_URL     = "server_url"
+private const val DEFAULT_URL        = "http://10.0.2.2/"
 
-/**
- * Stores JWT and server URL in [EncryptedSharedPreferences].
- * Accessed via [com.nanaring.app.di.AppContainer].
- */
 class AuthManager(context: Context) {
 
     private val prefs = EncryptedSharedPreferences.create(
@@ -25,13 +24,44 @@ class AuthManager(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
 
-    var jwt: String
-        get()      = prefs.getString(KEY_JWT, "") ?: ""
-        set(value) = prefs.edit().putString(KEY_JWT, value).apply()
+    var accessToken: String
+        get()      = prefs.getString(KEY_ACCESS_TOKEN, "") ?: ""
+        set(value) { prefs.edit().putString(KEY_ACCESS_TOKEN, value).apply() }
 
+    var refreshToken: String
+        get()      = prefs.getString(KEY_REFRESH_TOKEN, "") ?: ""
+        set(value) { prefs.edit().putString(KEY_REFRESH_TOKEN, value).apply() }
+
+    var userId: String
+        get()      = prefs.getString(KEY_USER_ID, "") ?: ""
+        set(value) { prefs.edit().putString(KEY_USER_ID, value).apply() }
+
+    /** Epoch seconds — Supabase returns `expires_at` as a Unix timestamp. */
+    var tokenExpiry: Long
+        get()      = prefs.getLong(KEY_TOKEN_EXPIRY, 0L)
+        set(value) { prefs.edit().putLong(KEY_TOKEN_EXPIRY, value).apply() }
+
+    /** Kept for DeveloperSettingsActivity backward compat. */
     var serverUrl: String
         get()      = prefs.getString(KEY_SERVER_URL, DEFAULT_URL) ?: DEFAULT_URL
-        set(value) = prefs.edit().putString(KEY_SERVER_URL, value).apply()
+        set(value) { prefs.edit().putString(KEY_SERVER_URL, value).apply() }
 
-    fun isConfigured(): Boolean = jwt.isNotBlank() && serverUrl.isNotBlank()
+    /** Alias so existing code referencing authManager.jwt still compiles. */
+    var jwt: String
+        get()      = accessToken
+        set(value) { accessToken = value }
+
+    /** True if we have a stored session (even if the access token expired — refresh will fix it). */
+    fun isSignedIn(): Boolean = userId.isNotBlank() && refreshToken.isNotBlank()
+
+    fun isConfigured(): Boolean = isSignedIn()
+
+    fun clearSession() {
+        prefs.edit()
+            .remove(KEY_ACCESS_TOKEN)
+            .remove(KEY_REFRESH_TOKEN)
+            .remove(KEY_USER_ID)
+            .putLong(KEY_TOKEN_EXPIRY, 0L)
+            .apply()
+    }
 }

@@ -17,6 +17,14 @@ android {
         versionName = "1.0.0-poc"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Read Supabase credentials from local.properties (not committed to git).
+        val localProps = java.util.Properties().apply {
+            val f = rootProject.file("local.properties")
+            if (f.exists()) load(f.inputStream())
+        }
+        buildConfigField("String", "SUPABASE_URL",      "\"${localProps["SUPABASE_URL"] ?: ""}\"")
+        buildConfigField("String", "SUPABASE_ANON_KEY", "\"${localProps["SUPABASE_ANON_KEY"] ?: ""}\"")
     }
 
     buildTypes {
@@ -40,6 +48,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     // Resolve duplicate META-INF files from transitive deps

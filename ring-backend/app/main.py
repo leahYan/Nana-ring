@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import Base, engine
+from app.api.v1.endpoints.admin import router as admin_router
 from app.api.v1.endpoints.health import router as health_router
 
 logger = logging.getLogger(__name__)
@@ -47,3 +48,4 @@ app.add_middleware(
 )
 
 app.include_router(health_router, prefix="/api/v1")
+app.include_router(admin_router,  prefix="/api/v1")

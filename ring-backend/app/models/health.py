@@ -13,9 +13,11 @@ SleepStageDetail is a child table – no device/server timestamps at all.
 """
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
+    DateTime,
     ForeignKey,
     Integer,
     Numeric,
@@ -26,6 +28,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql import func
 
 
 class Base(DeclarativeBase):
@@ -276,3 +279,33 @@ class SleepStageDetail(Base):
     stage_label: Mapped[str] = mapped_column(String(16), nullable=False)      # server-derived
     duration_minutes: Mapped[int] = mapped_column(SmallInteger, nullable=False)  # INT16, 1–600
     sync_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+
+# ---------------------------------------------------------------------------
+# doctor_patient  (admin-only linking table)
+# ---------------------------------------------------------------------------
+
+class DoctorPatient(Base):
+    """
+    Links a doctor UUID to a patient UUID. Created by docs/doctor_patient_rls.sql.
+    Only the backend (service role / direct Postgres) can INSERT or DELETE rows —
+    no client RLS policy permits writes from the anon key (TC-BE-08).
+    """
+    __tablename__ = "doctor_patient"
+    __table_args__ = (
+        UniqueConstraint("doctor_id", "patient_id", name="uq_doctor_patient"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # FK references auth.users — enforced by the SQL script, not SQLAlchemy,
+    # because SQLAlchemy cannot reference the Supabase auth schema directly.
+    doctor_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, index=True,
+    )
+    patient_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )

@@ -20,12 +20,17 @@
 
 ## 2. Sync & API
 
-- **Background Sync:** Use Android WorkManager to flush unsynced data to the cloud every 15 minutes.
-- **Batch Upload:** The backend must support a `POST /data/batch` endpoint to receive multiple records in one request. Payload format follows the `api_batch_upload` section of the data dictionary, including `envelope_id` for idempotency and a `type` field per record to route to the correct table.
-- **Authentication:** Secure all API traffic using JWT (JSON Web Tokens). The `user_id` is extracted server-side from the JWT — the Android app must never send `user_id` in the payload.
+- **Direct Supabase Sync:** The Android app syncs data directly to Supabase via its REST API (`POST /rest/v1/ring_*`). The FastAPI backend is NOT in the data ingestion path.
+- **Authentication (Android):** The app authenticates via Supabase Auth (email + password) on first launch. The returned JWT is stored in SharedPreferences and auto-refreshed before expiry. The `user_id` is derived from the JWT's `sub` field — never hardcoded.
+- **Idempotency:** Each row carries a client-generated `sync_id` (UUID). The `Prefer: resolution=ignore-duplicates` header leverages the `UNIQUE(sync_id, user_id)` constraint to prevent duplicates on retry.
+- **Background Sync:** Use Android WorkManager to flush unsynced data to Supabase every 15 minutes. Failed inserts are queued in Room and retried with exponential backoff.
+- **Row Level Security:** RLS policies on all `ring_*` tables enforce `user_id = auth.uid()` for INSERT and SELECT. Doctors access patient data via an additional `is_linked_doctor()` check against the `doctor_patient` linking table.
+- **Backend (Admin Only):** The FastAPI backend handles CSV export, doctor-patient link management, and admin queries. It connects via direct Postgres (`DATABASE_URL`), bypassing RLS.
 
 ## 3. Web Dashboard
 
+- **Authentication:** Doctors sign in via Supabase Auth (email + password) on the web dashboard. The JWT is sent with every Supabase REST request.
+- **Doctor Access:** RLS + `doctor_patient` linking table ensures each doctor only sees their assigned patients' data. The dashboard queries `/rest/v1/ring_heart_rate?user_id=eq.<patient_uuid>` — RLS silently filters out patients not linked to the requesting doctor.
 - **Visualisation:** Render 7-day trend charts for all health metrics using Recharts or similar.
 - **Empty States:** If no ring data exists for the selected period, display a clear "Waiting for Data" message. Never populate charts with placeholder or example data.
 - **Data Management:** Provide a dedicated "Export" page where the user can select a date range and download health data as a CSV file. The CSV headers must match the column names from `ring_data_dictionary.csv`.

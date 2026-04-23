@@ -2,11 +2,12 @@ package com.nanaring.app.di
 
 import android.content.Context
 import androidx.work.Configuration
+import com.nanaring.app.BuildConfig
 import com.nanaring.app.data.local.RingDatabase
 import com.nanaring.app.data.remote.RingApiService
 import com.nanaring.app.data.repository.PhysicalRingDataSource
 import com.nanaring.app.data.repository.RingRepository
-// MockRingDataSource has been removed — no fake/mock data sources permitted (PROJECT_OVERVIEW §2)
+import com.nanaring.app.sync.SupabaseSyncAuth
 import com.nanaring.app.sync.SyncWorkerFactory
 import com.nanaring.app.util.AuthManager
 import okhttp3.OkHttpClient
@@ -15,11 +16,10 @@ import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 
 /**
- * Manual DI container. Created once in [com.nanaring.app.NanaRingApplication] and
- * accessed via the Application instance throughout the app.
+ * Manual DI container. Created once in [com.nanaring.app.NanaRingApplication].
  *
- * apiService() is a method (not lazy val) so that a URL change in DeveloperSettings
- * causes Retrofit to be rebuilt on the next call — no stale endpoint references.
+ * [supabaseSyncAuth] is the primary data path — Android posts directly to Supabase REST.
+ * [apiService] is retained for admin/debug use; it is no longer in the ingestion path.
  */
 class AppContainer(context: Context) {
 
@@ -27,39 +27,43 @@ class AppContainer(context: Context) {
 
     val database: RingDatabase = RingDatabase.getInstance(context)
 
-    // Tracks the URL used when the current Retrofit instance was created.
+    // Shared OkHttpClient (logging interceptor for debugging).
+    val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .addInterceptor(
+            HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BODY }
+        )
+        .build()
+
+    // Primary sync path — direct Supabase REST with Supabase Auth.
+    val supabaseSyncAuth: SupabaseSyncAuth = SupabaseSyncAuth(
+        supabaseUrl = BuildConfig.SUPABASE_URL,
+        anonKey     = BuildConfig.SUPABASE_ANON_KEY,
+        authStore   = authManager,
+        client      = httpClient,
+    )
+
+    // Retrofit instance pointed at the FastAPI backend (admin/CSV export only).
+    // apiService() rebuilds if serverUrl changes in DeveloperSettings.
     private var cachedBaseUrl: String? = null
     private var cachedApiService: RingApiService? = null
 
     fun apiService(): RingApiService {
         val url = authManager.serverUrl
-        if (url == cachedBaseUrl && cachedApiService != null) {
-            return cachedApiService!!
-        }
-        val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BODY
-        }
-        val client = OkHttpClient.Builder()
-            .addInterceptor(logging)
-            .build()
-
+        if (url == cachedBaseUrl && cachedApiService != null) return cachedApiService!!
         val service = Retrofit.Builder()
             .baseUrl(url)
-            .client(client)
+            .client(httpClient)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(RingApiService::class.java)
-
-        cachedBaseUrl = url
+        cachedBaseUrl    = url
         cachedApiService = service
         return service
     }
 
-    // Repository — PhysicalRingDataSource is the only permitted implementation.
-    // All health data must originate from the physical ring via the SDK.
     val ringRepository: RingRepository = PhysicalRingDataSource(
-        context     = context,
-        application = context.applicationContext as android.app.Application,
+        context      = context,
+        application  = context.applicationContext as android.app.Application,
         heartRateDao = database.heartRateDao(),
     )
 

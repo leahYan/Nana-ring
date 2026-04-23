@@ -35,21 +35,118 @@ Reference tables (`sport_type_map`) and identity tables (`users`, `device`) are 
 - **Styling:** Tailwind CSS for a clean, "humanised" health dashboard interface.
 - **Empty states are mandatory:** Every chart and data view must handle the case where no data exists for the selected period. Display a clear "Waiting for Data" or "No Readings Available" message. Never render charts with placeholder, example, or demo data.
 
-## 4. Authentication & Multi-Tenancy (Multi-User POC)
+## 4. Authentication & Multi-Tenancy
 
-- **Isolation Strategy:** Every record is hard-linked to a `user_id`. The backend enforces a `WHERE user_id = current_user` filter on all requests unless the requester has an `is_admin` flag.
-- **Auth Flow:** No public registration or login UI for the POC.
-- **Provisioning:** A backend utility script (`generate_tokens.py`) creates unique JWTs for the 5 testers.
-- **Android Integration:** The JWT is manually entered into the Android app's configuration settings.
-- **Admin Access:** Admins can view all users' data via a `target_user_id` query parameter on the dashboard endpoints.
+### 4.1 Supabase Auth (User-Facing)
 
-## 5. Data Ingestion (Sync Engine)
+All patients and doctors authenticate via **Supabase Auth** (email + password). The auth flow:
 
-- **Endpoint:** `POST /data/batch`
-- **Payload format:** Defined in the `api_batch_upload` section of `ring_data_dictionary.csv`. Includes an `envelope_id` for batch-level idempotency and a `type` field per record to route to the correct database table.
-- **Idempotency:** Implement `ON CONFLICT (sync_id, user_id) DO NOTHING`. This allows the Android app to safely retry failed syncs without duplicating health data.
-- **Validation:** Apply all `validation_rules` from the data dictionary server-side. Reject records with values outside clinical ranges (e.g., SpO2 < 70%, heart rate outside 30–250 BPM). Return per-record error details in the response so the Android app can flag problematic readings.
-- **Clock Skew:** Validate `device_timestamp` is not more than 60 seconds into the future relative to `server_timestamp` (as defined in the `_common` validation rules). Reject timestamps that fail this check.
+1. **Sign up / Sign in** — Android app or web dashboard calls Supabase Auth endpoints using the **anon key** (safe to embed in APK/frontend).
+2. **JWT issued** — Supabase returns a JWT containing `sub` (user UUID), `role` (`authenticated`), and `exp` (expiry).
+3. **JWT sent with every request** — `Authorization: Bearer <JWT>` header on all REST calls.
+4. **RLS enforces isolation** — Postgres checks `auth.uid()` (extracted from the JWT) against `user_id` on every row operation.
+
+The anon key is **public by design** — RLS is the security gate, not the key.
+
+### 4.2 Row Level Security (RLS) Policies
+
+Every `ring_*` table has RLS enabled with these policies:
+
+| Policy | Operation | Rule |
+|---|---|---|
+| Patient inserts own data | INSERT | `user_id = auth.uid()` |
+| Patient reads own data | SELECT | `user_id = auth.uid()` |
+| Doctor reads linked patients | SELECT | `is_linked_doctor(user_id)` returns TRUE |
+| No client UPDATE/DELETE | — | No policies = blocked |
+
+The `doctor_patient` linking table is also RLS-protected:
+- Doctors can SELECT their own links.
+- Patients can SELECT their own links.
+- Only the backend (service role / direct Postgres) can INSERT or DELETE links.
+
+### 4.3 Doctor-Patient Linking
+
+The `doctor_patient` table (see `docs/doctor_patient_rls.sql`):
+
+```sql
+CREATE TABLE doctor_patient (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    doctor_id   UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    patient_id  UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(doctor_id, patient_id)
+);
+```
+
+A helper function `is_linked_doctor(p_patient_id UUID)` is used in all `ring_*` SELECT policies. It runs as `SECURITY DEFINER` so the RLS check can query the linking table.
+
+Admin operations (linking/unlinking) are done via the FastAPI backend or Supabase SQL Editor:
+```sql
+INSERT INTO doctor_patient (doctor_id, patient_id) VALUES ('doctor-uuid', 'patient-uuid');
+```
+
+### 4.4 Backend Admin Access
+
+The FastAPI backend connects via `DATABASE_URL` (direct Postgres connection), which **bypasses RLS entirely**. This is correct — the backend is trusted server-side code used for:
+- Admin queries across all users
+- CSV export
+- Doctor-patient link management
+- Any future admin dashboard features
+
+### 4.5 JWT Behaviour Across Devices
+
+The JWT `sub` field (user UUID) is **identical regardless of which device the user signs in from**. Session-specific fields (`iat`, `exp`, `jti`) change per login. This means:
+- Data synced from Phone A is immediately visible from Phone B (same `user_id`).
+- RLS treats all devices equally — there is no device-binding.
+
+## 5. Data Ingestion (Direct Supabase REST Sync)
+
+### 5.1 Android → Supabase (Primary Data Path)
+
+The Android app syncs health data **directly** to Supabase via its REST API, bypassing the FastAPI backend entirely for data ingestion.
+
+- **Endpoint pattern:** `POST https://<ref>.supabase.co/rest/v1/ring_heart_rate` (one endpoint per table).
+- **Headers:**
+  - `apikey: <SUPABASE_ANON_KEY>` — public key, safe in APK.
+  - `Authorization: Bearer <JWT>` — user's Supabase Auth JWT.
+  - `Content-Type: application/json`
+  - `Prefer: resolution=ignore-duplicates` — uses the `UNIQUE(sync_id, user_id)` constraint for safe retries.
+- **Payload:** JSON array of row objects. Column names must match the Supabase table exactly (snake_case, as defined in `ring_data_dictionary.csv`).
+- **`user_id`:** Set by the Android app to `auth.uid()` from the JWT. RLS verifies it matches — a mismatch is rejected.
+- **`id`:** UUID v4 generated client-side per row.
+- **`server_timestamp`:** Omitted from the payload — the DB column default `(EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT` fills it.
+- **`sync_id`:** UUID v4 generated client-side for idempotency.
+
+### 5.2 Response Codes
+
+| Code | Meaning |
+|---|---|
+| 201 | Row(s) inserted successfully |
+| 200 | Duplicate ignored (idempotent retry) |
+| 401 | Bad or expired JWT — trigger token refresh |
+| 400 | Column name mismatch or type error |
+| 403 | RLS policy violation (user_id doesn't match JWT) |
+
+### 5.3 Batch Sync Strategy
+
+The `SupabaseSyncAuth` helper class (see `ring-android/.../sync/SupabaseSyncAuth.kt`) provides:
+- Per-table insert methods with typed parameters matching the schema.
+- Auto token refresh (checks expiry within 60s, refreshes using mutex).
+- `insertBatch(table, rows)` for bulk inserts when the SDK delivers multiple readings at once.
+
+### 5.4 Offline Retry
+
+WorkManager tasks flush failed inserts from a local Room queue. On network restoration, pending rows are re-sent with their original `sync_id` — the `ignore-duplicates` header ensures no duplication even if the original POST actually succeeded but the response was lost.
+
+### 5.5 FastAPI Backend Role (Post-Ingestion Only)
+
+The FastAPI backend is **not in the data ingestion path**. It is used for:
+- `GET /export/csv` — CSV download for a date range.
+- `POST /admin/doctor-patient` — Link/unlink doctors to patients.
+- `GET /admin/users` — List registered users.
+- Any future aggregate analytics or reporting endpoints.
+
+All backend endpoints connect via `DATABASE_URL` (direct Postgres, bypasses RLS) and use the service role key for Supabase API calls when needed.
 
 ## 6. Android SDK Integration Contract
 

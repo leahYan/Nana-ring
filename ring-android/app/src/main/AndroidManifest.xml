@@ -40,6 +40,12 @@
             </intent-filter>
         </activity>
 
+        <!-- Login screen — shown when no Supabase Auth session is stored -->
+        <activity
+            android:name=".LoginActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- DeveloperSettingsActivity: not exported, launched only from 5× tap -->
         <activity
             android:name=".DeveloperSettingsActivity"

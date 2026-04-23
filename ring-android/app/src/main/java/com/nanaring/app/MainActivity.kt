@@ -24,7 +24,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var permissionManager: PermissionManager
     private lateinit var bluetoothAdapter: BluetoothAdapter
 
-    // Step 1 — request BLE permissions
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
@@ -33,18 +32,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Step 2 — request Bluetooth to be enabled (if permissions granted but BT is off)
     private val enableBluetoothLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
         if (bluetoothAdapter.isEnabled) {
             startScanInBackground()
         }
-        // If user declined, stay on Idle — ConnectionState already reflects that.
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Require Supabase Auth before doing anything else.
+        val syncAuth = (application as NanaRingApplication).container.supabaseSyncAuth
+        if (!syncAuth.restoreSession()) {
+            startActivity(Intent(this, LoginActivity::class.java))
+            finish()
+            return
+        }
+
         enableEdgeToEdge()
 
         permissionManager = PermissionManager(this)
@@ -75,7 +81,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Ensures Bluetooth is on before starting the scan. */
     private fun checkBluetoothAndScan() {
         if (!bluetoothAdapter.isEnabled) {
             enableBluetoothLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
@@ -89,7 +94,6 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch { repository.stopScan() }
     }
 
-    /** Called when the user taps a device row in the ScanResults screen. */
     private fun handleConnectToDevice(mac: String) {
         val repository = (application as NanaRingApplication).container.ringRepository
         lifecycleScope.launch { repository.connectToDevice(mac) }
