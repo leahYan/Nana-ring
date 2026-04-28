@@ -55,6 +55,7 @@ class LoginActivity : ComponentActivity() {
     }
 
     private fun navigateToMain() {
+        (application as NanaRingApplication).scheduleSyncWorker()
         startActivity(Intent(this, MainActivity::class.java))
         finish()
     }
