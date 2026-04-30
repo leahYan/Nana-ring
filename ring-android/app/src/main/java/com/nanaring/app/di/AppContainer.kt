@@ -65,6 +65,8 @@ class AppContainer(context: Context) {
         context      = context,
         application  = context.applicationContext as android.app.Application,
         heartRateDao = database.heartRateDao(),
+        activityDao  = database.activityDao(),
+        sleepDao     = database.sleepDao(),
     )
 
     val workerFactory: SyncWorkerFactory

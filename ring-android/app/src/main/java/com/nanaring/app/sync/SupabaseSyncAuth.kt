@@ -2,7 +2,9 @@ package com.nanaring.app.sync
 
 import android.util.Log
 import com.google.gson.Gson
+import com.nanaring.app.data.local.entity.ActivityEntity
 import com.nanaring.app.data.local.entity.HeartRateEntity
+import com.nanaring.app.data.local.entity.SleepEntity
 import com.nanaring.app.util.AuthManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -223,7 +225,112 @@ class SupabaseSyncAuth(
         return postRows("ring_temperature", rows)
     }
 
+    suspend fun insertBloodPressure(entities: List<HeartRateEntity>): Boolean {
+        val userId = authStore.userId
+        val rows = entities.mapNotNull { e ->
+            val sys = e.systolic  ?: return@mapNotNull null
+            val dia = e.diastolic ?: return@mapNotNull null
+            buildMap<String, Any> {
+                put("id", UUID.randomUUID().toString())
+                put("user_id", userId)
+                put("device_timestamp", e.deviceTimestamp)
+                put("systolic", sys)
+                put("diastolic", dia)
+                put("measurement_type", "manual")
+                put("sync_id", "${e.syncId}-bp")
+                e.firmwareVersion?.let { put("firmware_version", it) }
+                e.hardwareVersion?.let { put("hardware_version", it) }
+            }
+        }
+        if (rows.isEmpty()) return true
+        return postRows("ring_blood_pressure", rows)
+    }
+
+    suspend fun insertActivity(entities: List<ActivityEntity>): Boolean {
+        val userId = authStore.userId
+        val rows = entities.map { e ->
+            buildMap<String, Any> {
+                put("id", UUID.randomUUID().toString())
+                put("user_id", userId)
+                put("device_timestamp", e.deviceTimestamp)
+                put("days_ago", e.daysAgo)
+                put("steps", e.steps)
+                put("running_steps", e.runningSteps)
+                put("walk_distance_meters", e.walkDistanceMeters)
+                put("calories_kcal", e.caloriesKcal)
+                put("sport_duration_seconds", e.sportDurationSeconds)
+                put("sleep_duration_seconds", e.sleepDurationSeconds)
+                put("sync_id", e.syncId)
+            }
+        }
+        return postRows("ring_activity", rows)
+    }
+
+    suspend fun insertSleepSessions(entities: List<SleepEntity>): Boolean {
+        val userId = authStore.userId
+        var allOk = true
+
+        for (e in entities) {
+            val sessionRow = listOf(buildMap<String, Any> {
+                put("id", e.sleepId)
+                put("user_id", userId)
+                put("device_timestamp", e.deviceTimestamp)
+                put("days_ago", e.daysAgo)
+                put("start_timestamp", e.startTimestamp)
+                put("end_timestamp", e.endTimestamp)
+                put("deep_minutes", e.deepMinutes)
+                put("light_minutes", e.lightMinutes)
+                put("rem_minutes", e.remMinutes)
+                put("awake_minutes", e.awakeMinutes)
+                put("not_worn_minutes", e.notWornMinutes)
+                put("total_minutes", e.totalMinutes)
+                put("waking_count", e.wakingCount)
+                put("sync_id", e.syncId)
+            })
+            if (!postRows("ring_sleep", sessionRow)) { allOk = false; continue }
+
+            val stages = parseStagesJson(e.stagesJson)
+            if (stages.isEmpty()) continue
+            var offsetMs = 0L
+            val stageRows = stages.map { (type, durationMin) ->
+                val startMs = e.startTimestamp + offsetMs
+                offsetMs += durationMin * 60 * 1000L
+                buildMap<String, Any> {
+                    put("id", UUID.randomUUID().toString())
+                    put("sleep_id", e.sleepId)
+                    put("user_id", userId)
+                    put("stage", stageLabel(type))
+                    put("start_timestamp", startMs)
+                    put("duration_minutes", durationMin)
+                }
+            }
+            if (!postRows("ring_sleep_stage_detail", stageRows)) allOk = false
+        }
+        return allOk
+    }
+
     // ── Private helpers ──────────────────────────────────────────────────────
+
+    private fun parseStagesJson(json: String): List<Pair<Int, Int>> {
+        return try {
+            val arr = gson.fromJson(json, List::class.java) as? List<*> ?: return emptyList()
+            arr.mapNotNull { item ->
+                val map  = item as? Map<*, *> ?: return@mapNotNull null
+                val type = (map["type"] as? Double)?.toInt() ?: return@mapNotNull null
+                val dur  = (map["durationMinutes"] as? Double)?.toInt() ?: return@mapNotNull null
+                type to dur
+            }
+        } catch (_: Exception) { emptyList() }
+    }
+
+    private fun stageLabel(type: Int): String = when (type) {
+        1 -> "not_worn"
+        2 -> "light"
+        3 -> "deep"
+        4 -> "rem"
+        5 -> "awake"
+        else -> "unknown"
+    }
 
     private suspend fun fetchAndStoreUserProfile() {
         val userId = authStore.userId

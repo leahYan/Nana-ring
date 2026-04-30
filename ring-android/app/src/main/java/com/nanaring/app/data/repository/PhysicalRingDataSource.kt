@@ -11,9 +11,16 @@ import android.content.Context
 import android.content.IntentFilter
 import android.util.Log
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import com.nanaring.app.data.local.dao.ActivityDao
 import com.nanaring.app.data.local.dao.HeartRateDao
+import com.nanaring.app.data.local.dao.SleepDao
+import com.nanaring.app.data.local.entity.ActivityEntity
 import com.nanaring.app.data.local.entity.HeartRateEntity
+import com.nanaring.app.data.local.entity.SleepEntity
 import com.nanaring.app.ui.screens.ConnectionState
+import com.oudmon.ble.base.communication.req.ReadSleepDetailsReq
+import com.oudmon.ble.base.communication.req.ReadTotalSportDataReq
+import java.util.Calendar
 import com.nanaring.app.ui.screens.DiscoveredDevice
 import com.oudmon.ble.base.bluetooth.BleOperateManager
 import com.oudmon.ble.base.bluetooth.ListenerKey
@@ -68,6 +75,8 @@ class PhysicalRingDataSource(
     private val context: Context,
     private val application: Application,
     private val heartRateDao: HeartRateDao,
+    private val activityDao: ActivityDao,
+    private val sleepDao: SleepDao,
 ) : RingRepository {
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
@@ -86,6 +95,7 @@ class PhysicalRingDataSource(
     @Volatile private var receiverRegistered = false
     @Volatile private var measurementStarted = false
     @Volatile private var isMeasuring = false
+    @Volatile private var historicalDataRead = false
     private var scanTimeoutJob: Job? = null
     private var measurementJob: Job? = null
 
@@ -155,6 +165,7 @@ class PhysicalRingDataSource(
             } else {
                 stopPeriodicMeasurement()
                 measurementStarted = false
+                historicalDataRead = false
                 connectingMac = null
                 firmwareVersion = "unknown"
                 hardwareVersion = "unknown"
@@ -193,6 +204,13 @@ class PhysicalRingDataSource(
                     if (!measurementStarted) {
                         measurementStarted = true
                         startPeriodicMeasurement()
+                        scope.launch {
+                            delay(5_000)
+                            if (!historicalDataRead) {
+                                historicalDataRead = true
+                                readHistoricalData()
+                            }
+                        }
                     }
                 }
             })
@@ -323,6 +341,12 @@ class PhysicalRingDataSource(
 
     override suspend fun getUnsynced(): List<HeartRateEntity> = heartRateDao.getUnsynced()
     override suspend fun markSynced(ids: List<Long>) = heartRateDao.markSynced(ids)
+
+    override suspend fun getUnsyncedActivity(): List<ActivityEntity> = activityDao.getUnsynced()
+    override suspend fun markActivitySynced(ids: List<Long>) = activityDao.markSynced(ids)
+
+    override suspend fun getUnsyncedSleep(): List<SleepEntity> = sleepDao.getUnsynced()
+    override suspend fun markSleepSynced(ids: List<Long>) = sleepDao.markSynced(ids)
 
     // -------------------------------------------------------------------------
     // Internal helpers
@@ -457,10 +481,12 @@ class PhysicalRingDataSource(
         // Temperature encoding: ring sends (temp_tenths mod 256); add 256 to recover.
         scope.launch {
             try {
-                var latestHr   = 0
-                var latestSpO2 = 0
-                var latestHrv  = 0
-                var latestTemp = 0f
+                var latestHr        = 0
+                var latestSpO2      = 0
+                var latestHrv       = 0
+                var latestSystolic  = 0
+                var latestDiastolic = 0
+                var latestTemp      = 0f
 
                 // --- Heart Rate (35 s) ---
                 val hrCb = object : ICommandResponse<StartHeartRateRsp> {
@@ -517,6 +543,24 @@ class PhysicalRingDataSource(
                     delay(1_000)
                 }
 
+                // --- Blood Pressure (30 s) ---
+                if (supportsBP) {
+                    val bpCb = object : ICommandResponse<StartHeartRateRsp> {
+                        override fun onDataResponse(rsp: StartHeartRateRsp) {
+                            Log.d("BLE_DEBUG", "BP stream — errCode=${rsp.errCode} type=${rsp.type} sbp=${rsp.sbp} dbp=${rsp.dbp}")
+                            if (rsp.errCode.toInt() == 0 && rsp.sbp > 0 && rsp.dbp > 0) {
+                                latestSystolic  = rsp.sbp
+                                latestDiastolic = rsp.dbp
+                            }
+                        }
+                    }
+                    bleManager.manualModeBP(bpCb, false)
+                    delay(30_000)
+                    bleManager.manualModeBP(bpCb, true)
+                    Log.d("BLE_DEBUG", "BP done — sys=$latestSystolic dia=$latestDiastolic")
+                    delay(1_000)
+                }
+
                 // --- Temperature (30 s) ---
                 // Ring encodes temp as tenths-of-°C mod 256 (e.g. 36.0°C → 360 mod 256 = 104).
                 if (supportsTemp) {
@@ -540,13 +584,13 @@ class PhysicalRingDataSource(
                     deviceName  = prev?.deviceName ?: (lastKnownName ?: "Ring"),
                     bpm         = latestHr,
                     spO2        = if (latestSpO2 > 0) latestSpO2 else prev?.spO2 ?: 0,
-                    systolic    = prev?.systolic ?: 0,
-                    diastolic   = prev?.diastolic ?: 0,
+                    systolic    = if (latestSystolic > 0) latestSystolic else prev?.systolic ?: 0,
+                    diastolic   = if (latestDiastolic > 0) latestDiastolic else prev?.diastolic ?: 0,
                     hrv         = if (latestHrv > 0) latestHrv else prev?.hrv ?: 0,
                     stress      = prev?.stress ?: 0,
                     temperature = if (latestTemp > 0f) latestTemp else prev?.temperature ?: 0f,
                 )
-                Log.d("BLE_DEBUG", "Measurement complete — bpm=$latestHr spO2=$latestSpO2 hrv=$latestHrv temp=$latestTemp")
+                Log.d("BLE_DEBUG", "Measurement complete — bpm=$latestHr spO2=$latestSpO2 bp=$latestSystolic/$latestDiastolic hrv=$latestHrv temp=$latestTemp")
 
                 heartRateDao.insert(
                     HeartRateEntity(
@@ -554,8 +598,8 @@ class PhysicalRingDataSource(
                         bpm             = latestHr,
                         rri             = null,
                         spO2            = latestSpO2.takeIf { it > 0 },
-                        systolic        = null,
-                        diastolic       = null,
+                        systolic        = latestSystolic.takeIf { it > 0 },
+                        diastolic       = latestDiastolic.takeIf { it > 0 },
                         hrv             = latestHrv.takeIf { it > 0 },
                         stress          = null,
                         temperature     = latestTemp.takeIf { it > 0f },
@@ -591,6 +635,188 @@ class PhysicalRingDataSource(
                 mac  = device.address,
             )
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Historical data — activity + sleep for the last 7 days
+    // -------------------------------------------------------------------------
+
+    private fun readHistoricalData() {
+        scope.launch {
+            Log.d("BLE_DEBUG", "readHistoricalData — reading 7 days of activity + sleep")
+            readActivityHistory()
+            readSleepHistory()
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                "ring_sync",
+                ExistingWorkPolicy.KEEP,
+                OneTimeWorkRequestBuilder<SyncWorker>().build(),
+            )
+        }
+    }
+
+    private fun getInt(obj: Any, vararg names: String): Int {
+        for (name in names) {
+            try { return obj.javaClass.getField(name).getInt(obj) } catch (_: Exception) {}
+        }
+        return 0
+    }
+
+    private suspend fun readActivityHistory() {
+        val ch = CommandHandle.getInstance()
+        for (dayOffset in 0..6) {
+            val latch = kotlinx.coroutines.CompletableDeferred<Unit>()
+            ch.executeReqCmd(ReadTotalSportDataReq(dayOffset), object : ICommandResponse<BaseRspCmd> {
+                override fun onDataResponse(rsp: BaseRspCmd) {
+                    scope.launch {
+                        try {
+                            val steps    = getInt(rsp, "totalSteps", "steps")
+                            val running  = getInt(rsp, "runningSteps")
+                            val dist     = getInt(rsp, "walkDistance", "distance")
+                            val calorie  = getInt(rsp, "calorie", "calories")
+                            val sportDur = getInt(rsp, "sportDuration", "sportTime")
+                            val sleepDur = getInt(rsp, "sleepDuration", "sleepTime")
+                            if (steps <= 0 && calorie <= 0) return@launch
+                            val cal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -dayOffset) }
+                            val syncId = "activity-$dayOffset-${cal.get(Calendar.DAY_OF_MONTH)}-${cal.get(Calendar.MONTH)+1}-${cal.get(Calendar.YEAR)}"
+                            activityDao.insert(
+                                ActivityEntity(
+                                    deviceTimestamp      = System.currentTimeMillis(),
+                                    daysAgo              = dayOffset,
+                                    steps                = steps,
+                                    runningSteps         = running,
+                                    walkDistanceMeters   = dist,
+                                    caloriesKcal         = calorie / 1000,
+                                    sportDurationSeconds = sportDur,
+                                    sleepDurationSeconds = sleepDur,
+                                    syncId               = syncId,
+                                )
+                            )
+                            Log.d("BLE_DEBUG", "activity day-$dayOffset: steps=$steps cal=${calorie/1000}kcal")
+                        } finally {
+                            latch.complete(Unit)
+                        }
+                    }
+                }
+            })
+            kotlinx.coroutines.withTimeoutOrNull(10_000) { latch.await() }
+            delay(500)
+        }
+    }
+
+    private suspend fun readSleepHistory() {
+        val ch = CommandHandle.getInstance()
+        for (dayOffset in 0..6) {
+            val latch = kotlinx.coroutines.CompletableDeferred<Unit>()
+            ch.executeReqCmd(ReadSleepDetailsReq(dayOffset, 0, 0), object : ICommandResponse<BaseRspCmd> {
+                override fun onDataResponse(rsp: BaseRspCmd) {
+                    scope.launch {
+                        try {
+                            // SDK field on ReadSleepDetailsRsp — try common names
+                            val details = listOf("details", "sleepDetails", "bleDetails", "data")
+                                .firstNotNullOfOrNull { name ->
+                                    try { rsp.javaClass.getField(name).get(rsp) as? List<*> } catch (_: Exception) { null }
+                                } ?: return@launch
+                            if (details.isEmpty()) return@launch
+                            processSleepDetails(details, dayOffset)
+                        } finally {
+                            latch.complete(Unit)
+                        }
+                    }
+                }
+            })
+            kotlinx.coroutines.withTimeoutOrNull(10_000) { latch.await() }
+            delay(500)
+        }
+    }
+
+    private suspend fun processSleepDetails(details: List<*>, dayOffset: Int) {
+        // Build slotIndex → stageType map from each BleSleepDetails entry
+        val allQualities = mutableMapOf<Int, Int>()
+        for (detail in details) {
+            val d = detail ?: continue
+            // BleSleepDetails fields: timeIndex (Int), sleepQualities (IntArray)
+            val timeIndex = try {
+                d.javaClass.getField("timeIndex").getInt(d)
+            } catch (_: Exception) { continue }
+            val qualities = try {
+                d.javaClass.getField("sleepQualities").get(d) as? IntArray
+            } catch (_: Exception) { null } ?: continue
+            for ((i, type) in qualities.withIndex()) {
+                if (type > 0) allQualities[timeIndex + i] = type
+            }
+        }
+        if (allQualities.isEmpty()) return
+
+        val validSlots = allQualities.entries.filter { it.value in 2..5 }
+        if (validSlots.isEmpty()) return
+
+        val firstSlot = validSlots.minOf { it.key }
+        val lastSlot  = validSlots.maxOf { it.key }
+
+        // Midnight of the day (now - dayOffset days)
+        val midnight = Calendar.getInstance().apply {
+            add(Calendar.DAY_OF_YEAR, -dayOffset)
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+
+        val startTs = midnight + firstSlot * 15 * 60 * 1000L
+        val endTs   = midnight + (lastSlot + 1) * 15 * 60 * 1000L
+
+        var deepMinutes  = 0; var lightMinutes = 0; var remMinutes   = 0
+        var awakeMinutes = 0; var notWornMinutes = 0
+
+        for ((_, type) in allQualities) {
+            when (type) {
+                1 -> notWornMinutes += 15
+                2 -> lightMinutes   += 15
+                3 -> deepMinutes    += 15
+                4 -> remMinutes     += 15
+                5 -> awakeMinutes   += 15
+            }
+        }
+
+        // Group consecutive same-type slots into segments for stagesJson
+        val segments = mutableListOf<Pair<Int, Int>>() // type, durationMinutes
+        var segType = -1; var segSlots = 0
+        for (slotIdx in firstSlot..lastSlot) {
+            val type = allQualities[slotIdx] ?: 0
+            if (type == segType) {
+                segSlots++
+            } else {
+                if (segType > 0 && segSlots > 0) segments.add(segType to segSlots * 15)
+                segType = type; segSlots = 1
+            }
+        }
+        if (segType > 0 && segSlots > 0) segments.add(segType to segSlots * 15)
+
+        val stagesJson = "[" + segments.joinToString(",") { """{"type":${it.first},"durationMinutes":${it.second}}""" } + "]"
+        val totalMinutes = deepMinutes + lightMinutes + remMinutes + awakeMinutes
+
+        val cal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -dayOffset) }
+        val syncId = "sleep-$dayOffset-${cal.get(Calendar.DAY_OF_MONTH)}-${cal.get(Calendar.MONTH)+1}-${cal.get(Calendar.YEAR)}"
+
+        sleepDao.insert(
+            SleepEntity(
+                sleepId         = java.util.UUID.randomUUID().toString(),
+                deviceTimestamp = System.currentTimeMillis(),
+                daysAgo         = dayOffset,
+                startTimestamp  = startTs,
+                endTimestamp    = endTs,
+                deepMinutes     = deepMinutes,
+                lightMinutes    = lightMinutes,
+                remMinutes      = remMinutes,
+                awakeMinutes    = awakeMinutes,
+                notWornMinutes  = notWornMinutes,
+                totalMinutes    = totalMinutes,
+                wakingCount     = segments.count { it.first == 5 },
+                stagesJson      = stagesJson,
+                syncId          = syncId,
+            )
+        )
+        Log.d("BLE_DEBUG", "sleep day-$dayOffset: deep=$deepMinutes light=$lightMinutes rem=$remMinutes awake=$awakeMinutes total=$totalMinutes min")
     }
 
     // Called only from oneClickMeasurement path — StopHeartRateRsp.heart is the HR field.
