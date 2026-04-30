@@ -62,6 +62,7 @@ fun ConnectionScreen(
     onStopScan: () -> Unit,
     onConnectToDevice: (mac: String) -> Unit,
     onOpenDeveloperSettings: () -> Unit,
+    onOpenMyDoctors: () -> Unit = {},
     appVersion: String = "v1.0.0-poc",
 ) {
     Box(
@@ -81,17 +82,31 @@ fun ConnectionScreen(
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
             // ---- Header ----
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.align(Alignment.TopCenter),
+                ) {
+                    Text(
+                        text = "Nana Ring",
+                        style = MaterialTheme.typography.headlineLarge,
+                        color = TextPrimary,
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Health Monitor",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = TextSecondary,
+                    )
+                }
                 Text(
-                    text = "Nana Ring",
-                    style = MaterialTheme.typography.headlineLarge,
-                    color = TextPrimary,
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Health Monitor",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = TextSecondary,
+                    text = "My Doctors",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = AccentBlue,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .clickable(role = Role.Button, onClick = onOpenMyDoctors)
+                        .padding(8.dp),
                 )
             }
 

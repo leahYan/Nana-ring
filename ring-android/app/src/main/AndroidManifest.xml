@@ -51,6 +51,12 @@
             android:name=".DeveloperSettingsActivity"
             android:exported="false" />
 
+        <!-- MyDoctorsActivity: patient manages their linked doctors -->
+        <activity
+            android:name=".MyDoctorsActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- Disable WorkManager's default initialiser; we provide our own via Configuration.Provider -->
         <provider
             android:name="androidx.startup.InitializationProvider"

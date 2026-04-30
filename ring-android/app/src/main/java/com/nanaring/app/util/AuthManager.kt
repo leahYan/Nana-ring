@@ -9,6 +9,8 @@ private const val KEY_ACCESS_TOKEN   = "access_token"
 private const val KEY_REFRESH_TOKEN  = "refresh_token"
 private const val KEY_USER_ID        = "user_id"
 private const val KEY_TOKEN_EXPIRY   = "token_expiry"   // epoch seconds (Long)
+private const val KEY_USER_ROLE      = "user_role"
+private const val KEY_USER_FULL_NAME = "user_full_name"
 private const val KEY_SERVER_URL     = "server_url"
 private const val DEFAULT_URL        = "http://10.0.2.2/"
 
@@ -41,6 +43,14 @@ class AuthManager(context: Context) {
         get()      = prefs.getLong(KEY_TOKEN_EXPIRY, 0L)
         set(value) { prefs.edit().putLong(KEY_TOKEN_EXPIRY, value).apply() }
 
+    var userRole: String
+        get()      = prefs.getString(KEY_USER_ROLE, "") ?: ""
+        set(value) { prefs.edit().putString(KEY_USER_ROLE, value).apply() }
+
+    var userFullName: String
+        get()      = prefs.getString(KEY_USER_FULL_NAME, "") ?: ""
+        set(value) { prefs.edit().putString(KEY_USER_FULL_NAME, value).apply() }
+
     /** Kept for DeveloperSettingsActivity backward compat. */
     var serverUrl: String
         get()      = prefs.getString(KEY_SERVER_URL, DEFAULT_URL) ?: DEFAULT_URL
@@ -61,6 +71,8 @@ class AuthManager(context: Context) {
             .remove(KEY_ACCESS_TOKEN)
             .remove(KEY_REFRESH_TOKEN)
             .remove(KEY_USER_ID)
+            .remove(KEY_USER_ROLE)
+            .remove(KEY_USER_FULL_NAME)
             .putLong(KEY_TOKEN_EXPIRY, 0L)
             .apply()
     }

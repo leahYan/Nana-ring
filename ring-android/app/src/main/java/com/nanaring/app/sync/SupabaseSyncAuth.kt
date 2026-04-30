@@ -17,6 +17,12 @@ import java.util.UUID
 private const val TAG = "SupabaseSyncAuth"
 private val JSON_MEDIA = "application/json".toMediaType()
 
+data class DoctorProfile(
+    val id: String,
+    val fullName: String?,
+    val email: String?,
+)
+
 /**
  * Handles Supabase Auth (sign-up, sign-in, token refresh) and direct REST inserts
  * into the ring_* tables. All data paths bypass the FastAPI backend entirely.
@@ -48,6 +54,7 @@ class SupabaseSyncAuth(
             val resp = postAuth("/auth/v1/token?grant_type=password", body)
                 ?: return@withContext Result.failure(Exception("Sign-in failed"))
             storeSession(resp)
+            fetchAndStoreUserProfile()
             Result.success(Unit)
         }
 
@@ -57,6 +64,7 @@ class SupabaseSyncAuth(
             val resp = postAuth("/auth/v1/signup", body)
                 ?: return@withContext Result.failure(Exception("Sign-up failed"))
             storeSession(resp)
+            fetchAndStoreUserProfile()
             Result.success(Unit)
         }
 
@@ -80,6 +88,43 @@ class SupabaseSyncAuth(
                 true
             }
         }
+    }
+
+    // ── Doctor linking ───────────────────────────────────────────────────────
+
+    /** All users with role = 'doctor' in user_profiles (visible to any authenticated user). */
+    suspend fun fetchActiveDoctors(): List<DoctorProfile> =
+        withContext(Dispatchers.IO) {
+            val body = getRows("user_profiles?role=eq.doctor&select=id,full_name,email")
+                ?: return@withContext emptyList()
+            parseDoctorProfiles(body)
+        }
+
+    /** Doctors currently linked to the signed-in patient. */
+    suspend fun fetchLinkedDoctors(): List<DoctorProfile> =
+        withContext(Dispatchers.IO) {
+            val userId = authStore.userId
+            val linksBody = getRows("doctor_patient?patient_id=eq.$userId&select=doctor_id")
+                ?: return@withContext emptyList()
+            val links = gson.fromJson(linksBody, List::class.java) as? List<*>
+                ?: return@withContext emptyList()
+            val ids = links.mapNotNull { (it as? Map<*, *>)?.get("doctor_id") as? String }
+            if (ids.isEmpty()) return@withContext emptyList()
+            val profilesBody = getRows("user_profiles?id=in.(${ids.joinToString(",")})&select=id,full_name,email")
+                ?: return@withContext emptyList()
+            parseDoctorProfiles(profilesBody)
+        }
+
+    /** Link a doctor to the signed-in patient. RLS enforces patient_id = auth.uid() and is_doctor(). */
+    suspend fun addDoctorLink(doctorId: String): Boolean {
+        val userId = authStore.userId
+        return postRows("doctor_patient", listOf(mapOf("patient_id" to userId, "doctor_id" to doctorId)))
+    }
+
+    /** Remove a doctor link. RLS enforces patient_id = auth.uid(). */
+    suspend fun removeDoctorLink(doctorId: String): Boolean {
+        val userId = authStore.userId
+        return deleteRows("doctor_patient?patient_id=eq.$userId&doctor_id=eq.$doctorId")
     }
 
     // ── Per-table inserts ────────────────────────────────────────────────────
@@ -179,6 +224,64 @@ class SupabaseSyncAuth(
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
+
+    private suspend fun fetchAndStoreUserProfile() {
+        val userId = authStore.userId
+        if (userId.isBlank()) return
+        val body = getRows("user_profiles?id=eq.$userId&select=role,full_name") ?: return
+        val list = gson.fromJson(body, List::class.java) as? List<*> ?: return
+        val profile = list.firstOrNull() as? Map<*, *> ?: return
+        authStore.userRole     = profile["role"] as? String ?: "patient"
+        authStore.userFullName = profile["full_name"] as? String ?: ""
+    }
+
+    private fun parseDoctorProfiles(body: String): List<DoctorProfile> {
+        val list = gson.fromJson(body, List::class.java) as? List<*> ?: return emptyList()
+        return list.mapNotNull { item ->
+            val map = item as? Map<*, *> ?: return@mapNotNull null
+            DoctorProfile(
+                id       = map["id"] as? String ?: return@mapNotNull null,
+                fullName = map["full_name"] as? String,
+                email    = map["email"] as? String,
+            )
+        }
+    }
+
+    private suspend fun getRows(path: String): String? =
+        withContext(Dispatchers.IO) {
+            if (!refreshIfNeeded()) return@withContext null
+            val request = Request.Builder()
+                .url("$supabaseUrl/rest/v1/$path")
+                .get()
+                .addHeader("apikey", anonKey)
+                .addHeader("Authorization", "Bearer ${authStore.accessToken}")
+                .build()
+            val resp = client.newCall(request).execute()
+            val body = resp.body?.string()
+            if (!resp.isSuccessful) {
+                Log.w(TAG, "GET /rest/v1/$path → HTTP ${resp.code}: $body")
+                resp.close()
+                return@withContext null
+            }
+            resp.close()
+            body
+        }
+
+    private suspend fun deleteRows(path: String): Boolean =
+        withContext(Dispatchers.IO) {
+            if (!refreshIfNeeded()) return@withContext false
+            val request = Request.Builder()
+                .url("$supabaseUrl/rest/v1/$path")
+                .delete()
+                .addHeader("apikey", anonKey)
+                .addHeader("Authorization", "Bearer ${authStore.accessToken}")
+                .build()
+            val resp = client.newCall(request).execute()
+            val ok = resp.code in 200..204
+            if (!ok) Log.w(TAG, "DELETE /rest/v1/$path → HTTP ${resp.code}: ${resp.body?.string()}")
+            resp.close()
+            ok
+        }
 
     private suspend fun postRows(table: String, rows: List<Map<String, Any>>): Boolean =
         withContext(Dispatchers.IO) {

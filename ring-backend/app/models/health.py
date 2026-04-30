@@ -281,6 +281,22 @@ class SleepStageDetail(Base):
     sync_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
 
 # ---------------------------------------------------------------------------
+# user_profiles  (role-based access control)
+# ---------------------------------------------------------------------------
+
+class UserProfile(Base):
+    __tablename__ = "user_profiles"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="patient")
+    full_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # doctor_patient  (admin-only linking table)
 # ---------------------------------------------------------------------------
 

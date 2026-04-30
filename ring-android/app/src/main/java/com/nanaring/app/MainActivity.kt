@@ -67,6 +67,7 @@ class MainActivity : ComponentActivity() {
                         onStopScan          = ::handleStopScan,
                         onConnectToDevice   = ::handleConnectToDevice,
                         onOpenDeveloperSettings = ::openDeveloperSettings,
+                        onOpenMyDoctors     = ::openMyDoctors,
                     )
                 }
             }
@@ -106,5 +107,9 @@ class MainActivity : ComponentActivity() {
 
     private fun openDeveloperSettings() {
         startActivity(Intent(this, DeveloperSettingsActivity::class.java))
+    }
+
+    private fun openMyDoctors() {
+        startActivity(Intent(this, MyDoctorsActivity::class.java))
     }
 }
