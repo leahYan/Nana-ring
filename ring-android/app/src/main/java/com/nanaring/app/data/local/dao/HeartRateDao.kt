@@ -16,4 +16,7 @@ interface HeartRateDao {
 
     @Query("UPDATE heart_rate SET isSynced = 1 WHERE id IN (:ids)")
     suspend fun markSynced(ids: List<Long>)
+
+    @Query("SELECT * FROM heart_rate ORDER BY deviceTimestamp DESC LIMIT :limit")
+    suspend fun getRecent(limit: Int): List<HeartRateEntity>
 }

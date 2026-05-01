@@ -82,6 +82,9 @@ class PhysicalRingDataSource(
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
+    private val _recentReadings = MutableStateFlow<List<HeartRateEntity>>(emptyList())
+    override val recentReadings: StateFlow<List<HeartRateEntity>> = _recentReadings.asStateFlow()
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // Cached from BLE characteristic reads after each connection.
@@ -337,6 +340,10 @@ class PhysicalRingDataSource(
                 _connectionState.value = ConnectionState.ScanResults(discoveredDevices.toList())
             }
         }
+    }
+
+    private suspend fun refreshRecentReadings() {
+        _recentReadings.value = heartRateDao.getRecent(12)
     }
 
     override suspend fun getUnsynced(): List<HeartRateEntity> = heartRateDao.getUnsynced()
@@ -609,6 +616,7 @@ class PhysicalRingDataSource(
                         hardwareVersion = hardwareVersion,
                     )
                 )
+                refreshRecentReadings()
                 WorkManager.getInstance(context).enqueueUniqueWork(
                     "ring_sync",
                     ExistingWorkPolicy.KEEP,
@@ -852,6 +860,7 @@ class PhysicalRingDataSource(
                     hardwareVersion = hardwareVersion,
                 )
             )
+            refreshRecentReadings()
             // Enqueue sync immediately after insert — deduplicated so rapid measurements
             // don't stack up multiple workers.
             WorkManager.getInstance(context).enqueueUniqueWork(

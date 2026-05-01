@@ -60,9 +60,11 @@ class MainActivity : ComponentActivity() {
         setContent {
             NanaRingTheme {
                 val connectionState by repository.connectionState.collectAsStateWithLifecycle()
+                val recentReadings  by repository.recentReadings.collectAsStateWithLifecycle()
                 Scaffold(modifier = Modifier.fillMaxSize()) { _ ->
                     ConnectionScreen(
                         state               = connectionState,
+                        recentReadings      = recentReadings,
                         onStartScan         = ::handleStartScan,
                         onStopScan          = ::handleStopScan,
                         onConnectToDevice   = ::handleConnectToDevice,

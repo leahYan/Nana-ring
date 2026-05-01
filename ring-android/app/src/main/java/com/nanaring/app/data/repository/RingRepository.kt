@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.StateFlow
 
 interface RingRepository {
     val connectionState: StateFlow<ConnectionState>
+    val recentReadings: StateFlow<List<HeartRateEntity>>
 
     suspend fun startScan()
     suspend fun stopScan()
