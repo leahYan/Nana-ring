@@ -207,13 +207,6 @@ class PhysicalRingDataSource(
                     if (!measurementStarted) {
                         measurementStarted = true
                         startPeriodicMeasurement()
-                        scope.launch {
-                            delay(5_000)
-                            if (!historicalDataRead) {
-                                historicalDataRead = true
-                                readHistoricalData()
-                            }
-                        }
                     }
                 }
             })
@@ -625,6 +618,12 @@ class PhysicalRingDataSource(
             } finally {
                 isMeasuring = false
             }
+            // Historical read runs after the first measurement so it never
+            // sends commands concurrently with an active measurement.
+            if (!historicalDataRead) {
+                historicalDataRead = true
+                readHistoricalData()
+            }
         }
     }
 
@@ -868,6 +867,10 @@ class PhysicalRingDataSource(
                 ExistingWorkPolicy.KEEP,
                 OneTimeWorkRequestBuilder<SyncWorker>().build(),
             )
+            if (!historicalDataRead) {
+                historicalDataRead = true
+                readHistoricalData()
+            }
         }
     }
 }
