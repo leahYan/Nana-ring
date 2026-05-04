@@ -41,6 +41,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
+import com.nanaring.app.RingConnectionService
 import com.nanaring.app.sync.SyncWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -162,6 +163,8 @@ class PhysicalRingDataSource(
                 lastKnownMac = device.address
                 lastKnownName = name
 
+                // Foreground service keeps the process alive during measurement + sync.
+                RingConnectionService.start(context)
                 // Show Connected UI immediately so the user knows the GATT link is up.
                 // Commands are sent in onServiceDiscovered() when the ring is actually ready.
                 _connectionState.value = ConnectionState.Connected(name)
@@ -174,6 +177,7 @@ class PhysicalRingDataSource(
                 firmwareVersion = "unknown"
                 hardwareVersion = "unknown"
                 _connectionState.value = ConnectionState.Idle
+                RingConnectionService.stop(context)
                 Log.d("BLE_DEBUG", "GATT disconnected")
             }
         }

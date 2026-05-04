@@ -12,6 +12,10 @@
     <!-- Required for BLE scanning on all versions; Samsung API 31+ also needs this -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
+    <!-- Foreground service keeps the process alive during BLE measurement -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
     <!-- WorkManager sync requires network -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -56,6 +60,12 @@
             android:name=".MyDoctorsActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
+
+        <!-- Foreground service — keeps process alive while ring is connected and measuring -->
+        <service
+            android:name=".RingConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <!-- Disable WorkManager's default initialiser; we provide our own via Configuration.Provider -->
         <provider
