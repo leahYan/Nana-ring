@@ -39,6 +39,7 @@ import com.oudmon.ble.base.communication.rsp.StartHeartRateRsp
 import com.oudmon.ble.base.communication.rsp.StopHeartRateRsp
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import com.nanaring.app.sync.SyncWorker
 import kotlinx.coroutines.CoroutineScope
@@ -620,7 +621,9 @@ class PhysicalRingDataSource(
                 WorkManager.getInstance(context).enqueueUniqueWork(
                     "ring_sync_immediate",
                     ExistingWorkPolicy.KEEP,
-                    OneTimeWorkRequestBuilder<SyncWorker>().build(),
+                    OneTimeWorkRequestBuilder<SyncWorker>()
+                        .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                        .build(),
                 )
             } finally {
                 isMeasuring = false
@@ -663,7 +666,9 @@ class PhysicalRingDataSource(
             WorkManager.getInstance(context).enqueueUniqueWork(
                 "ring_sync_immediate",
                 ExistingWorkPolicy.KEEP,
-                OneTimeWorkRequestBuilder<SyncWorker>().build(),
+                OneTimeWorkRequestBuilder<SyncWorker>()
+                        .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                        .build(),
             )
         }
     }
@@ -872,7 +877,9 @@ class PhysicalRingDataSource(
             WorkManager.getInstance(context).enqueueUniqueWork(
                 "ring_sync_immediate",
                 ExistingWorkPolicy.KEEP,
-                OneTimeWorkRequestBuilder<SyncWorker>().build(),
+                OneTimeWorkRequestBuilder<SyncWorker>()
+                        .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                        .build(),
             )
             if (!historicalDataRead) {
                 historicalDataRead = true

@@ -1,9 +1,12 @@
 package com.nanaring.app.sync
 
 import android.content.Context
+import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.nanaring.app.NanaRingApplication
+
+private const val TAG = "SyncWorker"
 
 class SyncWorker(
     appContext: Context,
@@ -15,19 +18,28 @@ class SyncWorker(
         val repository = container.ringRepository
         val syncAuth   = container.supabaseSyncAuth
 
-        // No stored session → user must re-authenticate; don't retry automatically.
-        if (!syncAuth.restoreSession()) return Result.failure()
+        Log.d(TAG, "doWork started (attempt ${runAttemptCount + 1})")
+
+        if (!syncAuth.restoreSession()) {
+            Log.w(TAG, "No session — skipping sync")
+            return Result.failure()
+        }
 
         val unsynced         = repository.getUnsynced()
         val unsyncedActivity = repository.getUnsyncedActivity()
         val unsyncedSleep    = repository.getUnsyncedSleep()
 
+        Log.d(TAG, "Unsynced — heartRate=${unsynced.size} activity=${unsyncedActivity.size} sleep=${unsyncedSleep.size}")
+
         if (unsynced.isEmpty() && unsyncedActivity.isEmpty() && unsyncedSleep.isEmpty()) {
+            Log.d(TAG, "Nothing to sync")
             return Result.success()
         }
 
-        // Refresh the access token once before all inserts (TC-BE-06).
-        if (!syncAuth.refreshIfNeeded()) return Result.retry()
+        if (!syncAuth.refreshIfNeeded()) {
+            Log.w(TAG, "Token refresh failed — will retry")
+            return Result.retry()
+        }
 
         return try {
             val hrOk       = if (unsynced.isEmpty()) true else syncAuth.insertHeartRate(unsynced)
@@ -39,18 +51,20 @@ class SyncWorker(
             val activityOk = if (unsyncedActivity.isEmpty()) true else syncAuth.insertActivity(unsyncedActivity)
             val sleepOk    = if (unsyncedSleep.isEmpty()) true else syncAuth.insertSleepSessions(unsyncedSleep)
 
+            Log.d(TAG, "Insert results — hr=$hrOk spo2=$spo2Ok hrv=$hrvOk stress=$stOk temp=$tmpOk bp=$bpOk activity=$activityOk sleep=$sleepOk")
+
             if (hrOk && spo2Ok && hrvOk && stOk && tmpOk && bpOk && activityOk && sleepOk) {
                 if (unsynced.isNotEmpty()) repository.markSynced(unsynced.map { it.id })
                 if (unsyncedActivity.isNotEmpty()) repository.markActivitySynced(unsyncedActivity.map { it.id })
                 if (unsyncedSleep.isNotEmpty()) repository.markSleepSynced(unsyncedSleep.map { it.id })
+                Log.d(TAG, "Sync complete")
                 Result.success()
             } else {
-                // Partial failure — retry with exponential backoff.
-                // The Prefer: resolution=ignore-duplicates header prevents duplicates
-                // for rows that were already successfully inserted (TC-BE-02).
+                Log.w(TAG, "Partial failure — retrying")
                 Result.retry()
             }
         } catch (e: Exception) {
+            Log.e(TAG, "Sync exception: ${e.message}", e)
             Result.retry()
         }
     }
