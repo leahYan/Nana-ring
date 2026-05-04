@@ -146,7 +146,7 @@ class SupabaseSyncAuth(
                 e.hardwareVersion?.let { put("hardware_version", it) }
             }
         }
-        return postRows("ring_heart_rate", rows)
+        return postRows("ring_heart_rate?on_conflict=sync_id,user_id", rows)
     }
 
     suspend fun insertSpO2(entities: List<HeartRateEntity>): Boolean {
@@ -159,13 +159,13 @@ class SupabaseSyncAuth(
                 put("device_timestamp", e.deviceTimestamp)
                 put("percent", pct)
                 put("reading_type", "manual")
-                put("sync_id", "${e.syncId}-spo2")
+                put("sync_id", derivedUUID("${e.syncId}-spo2"))
                 e.firmwareVersion?.let { put("firmware_version", it) }
                 e.hardwareVersion?.let { put("hardware_version", it) }
             }
         }
         if (rows.isEmpty()) return true
-        return postRows("ring_spo2", rows)
+        return postRows("ring_spo2?on_conflict=sync_id,user_id", rows)
     }
 
     suspend fun insertHRV(entities: List<HeartRateEntity>): Boolean {
@@ -178,13 +178,13 @@ class SupabaseSyncAuth(
                 put("device_timestamp", e.deviceTimestamp)
                 put("ms", ms)
                 put("source", e.source)
-                put("sync_id", "${e.syncId}-hrv")
+                put("sync_id", derivedUUID("${e.syncId}-hrv"))
                 e.firmwareVersion?.let { put("firmware_version", it) }
                 e.hardwareVersion?.let { put("hardware_version", it) }
             }
         }
         if (rows.isEmpty()) return true
-        return postRows("ring_hrv", rows)
+        return postRows("ring_hrv?on_conflict=sync_id,user_id", rows)
     }
 
     suspend fun insertStress(entities: List<HeartRateEntity>): Boolean {
@@ -197,13 +197,13 @@ class SupabaseSyncAuth(
                 put("device_timestamp", e.deviceTimestamp)
                 put("level", lvl)
                 put("source", e.source)
-                put("sync_id", "${e.syncId}-stress")
+                put("sync_id", derivedUUID("${e.syncId}-stress"))
                 e.firmwareVersion?.let { put("firmware_version", it) }
                 e.hardwareVersion?.let { put("hardware_version", it) }
             }
         }
         if (rows.isEmpty()) return true
-        return postRows("ring_stress", rows)
+        return postRows("ring_stress?on_conflict=sync_id,user_id", rows)
     }
 
     suspend fun insertTemperature(entities: List<HeartRateEntity>): Boolean {
@@ -216,13 +216,13 @@ class SupabaseSyncAuth(
                 put("device_timestamp", e.deviceTimestamp)
                 put("celsius_primary", c)
                 put("measurement_mode", "manual_once")
-                put("sync_id", "${e.syncId}-temp")
+                put("sync_id", derivedUUID("${e.syncId}-temp"))
                 e.firmwareVersion?.let { put("firmware_version", it) }
                 e.hardwareVersion?.let { put("hardware_version", it) }
             }
         }
         if (rows.isEmpty()) return true
-        return postRows("ring_temperature", rows)
+        return postRows("ring_temperature?on_conflict=sync_id,user_id", rows)
     }
 
     suspend fun insertBloodPressure(entities: List<HeartRateEntity>): Boolean {
@@ -237,13 +237,13 @@ class SupabaseSyncAuth(
                 put("systolic", sys)
                 put("diastolic", dia)
                 put("measurement_type", "manual")
-                put("sync_id", "${e.syncId}-bp")
+                put("sync_id", derivedUUID("${e.syncId}-bp"))
                 e.firmwareVersion?.let { put("firmware_version", it) }
                 e.hardwareVersion?.let { put("hardware_version", it) }
             }
         }
         if (rows.isEmpty()) return true
-        return postRows("ring_blood_pressure", rows)
+        return postRows("ring_blood_pressure?on_conflict=sync_id,user_id", rows)
     }
 
     suspend fun insertActivity(entities: List<ActivityEntity>): Boolean {
@@ -260,10 +260,10 @@ class SupabaseSyncAuth(
                 put("calories_kcal", e.caloriesKcal)
                 put("sport_duration_seconds", e.sportDurationSeconds)
                 put("sleep_duration_seconds", e.sleepDurationSeconds)
-                put("sync_id", e.syncId)
+                put("sync_id", derivedUUID(e.syncId))
             }
         }
-        return postRows("ring_activity", rows)
+        return postRows("ring_activity?on_conflict=sync_id,user_id", rows)
     }
 
     suspend fun insertSleepSessions(entities: List<SleepEntity>): Boolean {
@@ -285,9 +285,9 @@ class SupabaseSyncAuth(
                 put("not_worn_minutes", e.notWornMinutes)
                 put("total_minutes", e.totalMinutes)
                 put("waking_count", e.wakingCount)
-                put("sync_id", e.syncId)
+                put("sync_id", derivedUUID(e.syncId))
             })
-            if (!postRows("ring_sleep", sessionRow)) { allOk = false; continue }
+            if (!postRows("ring_sleep?on_conflict=sync_id,user_id", sessionRow)) { allOk = false; continue }
 
             val stages = parseStagesJson(e.stagesJson)
             if (stages.isEmpty()) continue
@@ -310,6 +310,12 @@ class SupabaseSyncAuth(
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
+
+    // Produce a deterministic, valid UUID from any string (UUID v3 / MD5).
+    // Used to convert string-suffixed sync IDs ("base-spo2", "activity-0-4-5-2026")
+    // into proper UUIDs required by Supabase UUID columns, while keeping idempotency.
+    private fun derivedUUID(value: String): String =
+        UUID.nameUUIDFromBytes(value.toByteArray(Charsets.UTF_8)).toString()
 
     private fun parseStagesJson(json: String): List<Pair<Int, Int>> {
         return try {
