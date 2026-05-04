@@ -1,0 +1,112 @@
+supabase_table,supabase_column,postgres_type,nullable,android_entity,android_field,json_key_sent,transform,status,notes
+ring_heart_rate,id,UUID,NOT NULL,HeartRateEntity,-,id,UUID.randomUUID().toString(),OK,Android generates the UUID client-side before posting
+ring_heart_rate,user_id,UUID,NOT NULL,HeartRateEntity,-,user_id,authStore.userId (from SharedPreferences),OK,Never comes from the entity - always from the auth store
+ring_heart_rate,device_timestamp,BIGINT,NOT NULL,HeartRateEntity,deviceTimestamp,device_timestamp,none,OK,Unix ms UTC
+ring_heart_rate,server_timestamp,BIGINT,NOT NULL,-,-,- not sent -,Supabase server_default: EXTRACT(EPOCH FROM NOW())*1000,OK,Set by Supabase automatically; Android must not send it
+ring_heart_rate,bpm,SMALLINT,NOT NULL,HeartRateEntity,bpm,bpm,none,OK,Range 30–250
+ring_heart_rate,rri,INT,nullable,HeartRateEntity,rri,rri,only sent when non-null,OK,R-to-R interval ms; manual only
+ring_heart_rate,source,VARCHAR(32),NOT NULL,HeartRateEntity,source,source,none,OK,manual | continuous
+ring_heart_rate,sync_id,UUID,nullable,HeartRateEntity,syncId,sync_id,none,OK,No suffix - used as-is for heart_rate rows
+ring_heart_rate,firmware_version,VARCHAR(32),nullable,HeartRateEntity,firmwareVersion,firmware_version,only sent when non-null,OK,
+ring_heart_rate,hardware_version,VARCHAR(32),nullable,HeartRateEntity,hardwareVersion,hardware_version,only sent when non-null,OK,
+ring_spo2,id,UUID,NOT NULL,HeartRateEntity,-,id,UUID.randomUUID().toString(),OK,
+ring_spo2,user_id,UUID,NOT NULL,HeartRateEntity,-,user_id,authStore.userId,OK,
+ring_spo2,device_timestamp,BIGINT,NOT NULL,HeartRateEntity,deviceTimestamp,device_timestamp,none,OK,
+ring_spo2,server_timestamp,BIGINT,NOT NULL,-,-,- not sent -,Supabase server_default,OK,
+ring_spo2,percent,SMALLINT,NOT NULL,HeartRateEntity,spO2,percent,none,OK,Null entities are skipped before posting
+ring_spo2,reading_type,VARCHAR(32),NOT NULL,-,-,reading_type,"hardcoded ""manual""",OK,Only manual readings synced via this path; hourly/interval not yet implemented
+ring_spo2,interval_minutes,SMALLINT,nullable,-,-,- not sent -,-,OK,Nullable; only needed for interval mode
+ring_spo2,day_index,SMALLINT,nullable,-,-,- not sent -,-,OK,Nullable; only needed for interval/hourly mode
+ring_spo2,sync_id,UUID,nullable,HeartRateEntity,syncId,sync_id,"suffixed: ""${syncId}-spo2""",OK,Suffix prevents collision with the heart_rate row from the same measurement
+ring_spo2,firmware_version,VARCHAR(32),nullable,HeartRateEntity,firmwareVersion,firmware_version,only sent when non-null,OK,
+ring_spo2,hardware_version,VARCHAR(32),nullable,HeartRateEntity,hardwareVersion,hardware_version,only sent when non-null,OK,
+ring_hrv,id,UUID,NOT NULL,HeartRateEntity,-,id,UUID.randomUUID().toString(),OK,
+ring_hrv,user_id,UUID,NOT NULL,HeartRateEntity,-,user_id,authStore.userId,OK,
+ring_hrv,device_timestamp,BIGINT,NOT NULL,HeartRateEntity,deviceTimestamp,device_timestamp,none,OK,
+ring_hrv,server_timestamp,BIGINT,NOT NULL,-,-,- not sent -,Supabase server_default,OK,
+ring_hrv,ms,SMALLINT,NOT NULL,HeartRateEntity,hrv,ms,none,OK,RMSSD in ms; null entities skipped before posting
+ring_hrv,source,VARCHAR(32),NOT NULL,HeartRateEntity,source,source,none,OK,
+ring_hrv,interval_minutes,SMALLINT,nullable,-,-,- not sent -,-,OK,Nullable; only set for synced continuous history (not yet implemented)
+ring_hrv,day_offset,SMALLINT,nullable,-,-,- not sent -,-,OK,Nullable; only set for synced continuous history
+ring_hrv,sync_id,UUID,nullable,HeartRateEntity,syncId,sync_id,"suffixed: ""${syncId}-hrv""",OK,
+ring_hrv,firmware_version,VARCHAR(32),nullable,HeartRateEntity,firmwareVersion,firmware_version,only sent when non-null,OK,
+ring_hrv,hardware_version,VARCHAR(32),nullable,HeartRateEntity,hardwareVersion,hardware_version,only sent when non-null,OK,
+ring_stress,id,UUID,NOT NULL,HeartRateEntity,-,id,UUID.randomUUID().toString(),OK,
+ring_stress,user_id,UUID,NOT NULL,HeartRateEntity,-,user_id,authStore.userId,OK,
+ring_stress,device_timestamp,BIGINT,NOT NULL,HeartRateEntity,deviceTimestamp,device_timestamp,none,OK,
+ring_stress,server_timestamp,BIGINT,NOT NULL,-,-,- not sent -,Supabase server_default,OK,
+ring_stress,level,SMALLINT,NOT NULL,HeartRateEntity,stress,level,none,OK,Stress index 0–100; null entities skipped before posting
+ring_stress,source,VARCHAR(32),NOT NULL,HeartRateEntity,source,source,none,OK,
+ring_stress,interval_minutes,SMALLINT,nullable,-,-,- not sent -,-,OK,Nullable; only for synced continuous history
+ring_stress,day_offset,SMALLINT,nullable,-,-,- not sent -,-,OK,Nullable; only for synced continuous history
+ring_stress,sync_id,UUID,nullable,HeartRateEntity,syncId,sync_id,"suffixed: ""${syncId}-stress""",OK,
+ring_stress,firmware_version,VARCHAR(32),nullable,HeartRateEntity,firmwareVersion,firmware_version,only sent when non-null,OK,
+ring_stress,hardware_version,VARCHAR(32),nullable,HeartRateEntity,hardwareVersion,hardware_version,only sent when non-null,OK,
+ring_temperature,id,UUID,NOT NULL,HeartRateEntity,-,id,UUID.randomUUID().toString(),OK,
+ring_temperature,user_id,UUID,NOT NULL,HeartRateEntity,-,user_id,authStore.userId,OK,
+ring_temperature,device_timestamp,BIGINT,NOT NULL,HeartRateEntity,deviceTimestamp,device_timestamp,none,OK,
+ring_temperature,server_timestamp,BIGINT,NOT NULL,-,-,- not sent -,Supabase server_default,OK,
+ring_temperature,celsius_primary,NUMERIC(5-2),NOT NULL,HeartRateEntity,temperature,celsius_primary,none,OK,Already in °C; null entities skipped before posting
+ring_temperature,celsius_side1,NUMERIC(5-2),nullable,-,-,- not sent -,-,OK,Nullable; current sync only captures single-sensor manual readings
+ring_temperature,celsius_side2,NUMERIC(5-2),nullable,-,-,- not sent -,-,OK,Nullable
+ring_temperature,measurement_mode,VARCHAR(32),NOT NULL,-,-,measurement_mode,"hardcoded ""manual_once""",OK,Only manual_once measurements synced via this path
+ring_temperature,time_span_minutes,SMALLINT,nullable,-,-,- not sent -,-,OK,Nullable; only for auto_series mode
+ring_temperature,day_index,SMALLINT,nullable,-,-,- not sent -,-,OK,Nullable; only for interval/series mode
+ring_temperature,sync_id,UUID,nullable,HeartRateEntity,syncId,sync_id,"suffixed: ""${syncId}-temp""",OK,
+ring_temperature,firmware_version,VARCHAR(32),nullable,HeartRateEntity,firmwareVersion,firmware_version,only sent when non-null,OK,
+ring_temperature,hardware_version,VARCHAR(32),nullable,HeartRateEntity,hardwareVersion,hardware_version,only sent when non-null,OK,
+ring_blood_pressure,id,UUID,NOT NULL,HeartRateEntity,-,id,UUID.randomUUID().toString(),OK,
+ring_blood_pressure,user_id,UUID,NOT NULL,HeartRateEntity,-,user_id,authStore.userId,OK,
+ring_blood_pressure,device_timestamp,BIGINT,NOT NULL,HeartRateEntity,deviceTimestamp,device_timestamp,none,OK,
+ring_blood_pressure,server_timestamp,BIGINT,NOT NULL,-,-,- not sent -,Supabase server_default,OK,
+ring_blood_pressure,systolic,SMALLINT,NOT NULL,HeartRateEntity,systolic,systolic,none,OK,mmHg; null entities skipped before posting
+ring_blood_pressure,diastolic,SMALLINT,NOT NULL,HeartRateEntity,diastolic,diastolic,none,OK,mmHg
+ring_blood_pressure,heart_rate_used,INT,nullable,-,-,- not sent -,-,OK (gap),Column is nullable but data dict says it is recommended for auditability; SupabaseSyncAuth never sends it
+ring_blood_pressure,measurement_type,VARCHAR(32),NOT NULL,-,-,measurement_type,"hardcoded ""manual""",BUG,"Column enum is manual_ring | auto_hourly - ""manual"" is not a valid value; Supabase will accept it (no CHECK constraint enforced by PostgREST by default) but it violates the schema contract and breaks FastAPI validation if data is later re-read through that path"
+ring_blood_pressure,sync_id,UUID,nullable,HeartRateEntity,syncId,sync_id,"suffixed: ""${syncId}-bp""",OK,
+ring_blood_pressure,firmware_version,VARCHAR(32),nullable,HeartRateEntity,firmwareVersion,firmware_version,only sent when non-null,OK,
+ring_blood_pressure,hardware_version,VARCHAR(32),nullable,HeartRateEntity,hardwareVersion,hardware_version,only sent when non-null,OK,
+ring_activity,id,UUID,NOT NULL,ActivityEntity,-,id,UUID.randomUUID().toString(),OK,
+ring_activity,user_id,UUID,NOT NULL,ActivityEntity,-,user_id,authStore.userId,OK,
+ring_activity,device_timestamp,BIGINT,NOT NULL,ActivityEntity,deviceTimestamp,device_timestamp,none,OK,
+ring_activity,server_timestamp,BIGINT,NOT NULL,-,-,- not sent -,Supabase server_default,OK,
+ring_activity,days_ago,SMALLINT,NOT NULL,ActivityEntity,daysAgo,days_ago,none,OK,0=today … 7
+ring_activity,steps,INT,NOT NULL,ActivityEntity,steps,steps,none,OK,
+ring_activity,running_steps,INT,nullable,ActivityEntity,runningSteps,running_steps,none,OK,
+ring_activity,distance_meters,INT,nullable,ActivityEntity,walkDistanceMeters,walk_distance_meters,none,BUG (key mismatch),"Android sends key ""walk_distance_meters"" but the column is ""distance_meters"" — value is silently dropped. NOT NULL removed by migration 001 so inserts no longer fail; data is NULL until Android field name is fixed"
+ring_activity,calories_kcal,INT,NOT NULL,ActivityEntity,caloriesKcal,calories_kcal,SDK BleStepTotal.calorie / 1000,OK,Division is done before storing in Room entity
+ring_activity,active_duration_seconds,INT,nullable,ActivityEntity,sportDurationSeconds,sport_duration_seconds,none,BUG (key mismatch),"Android sends key ""sport_duration_seconds"" but the column is ""active_duration_seconds"" — value is silently dropped. NOT NULL removed by migration 001 so inserts no longer fail; data is NULL until Android field name is fixed"
+ring_activity,sleep_duration_seconds,INT,nullable,ActivityEntity,sleepDurationSeconds,sleep_duration_seconds,none,OK,
+ring_activity,sync_id,UUID,nullable,ActivityEntity,syncId,sync_id,none,OK,"Format: ""activity-{daysAgo}-{day}-{month}-{year}"""
+ring_activity,firmware_version,VARCHAR(32),nullable,-,-,- not sent -,-,OK,ActivityDetail uses CoreMixin (no firmware/hardware per data dict); ring_activity uses TimestampMixin but Android does not send these fields - columns are nullable so this is fine
+ring_activity,hardware_version,VARCHAR(32),nullable,-,-,- not sent -,-,OK,
+ring_sleep,id,UUID,NOT NULL,SleepEntity,sleepId,id,none,OK,Pre-generated UUID stored in the entity - used as FK in ring_sleep_stage_detail
+ring_sleep,user_id,UUID,NOT NULL,SleepEntity,-,user_id,authStore.userId,OK,
+ring_sleep,device_timestamp,BIGINT,NOT NULL,SleepEntity,deviceTimestamp,device_timestamp,none,OK,
+ring_sleep,server_timestamp,BIGINT,NOT NULL,-,-,- not sent -,Supabase server_default,OK,
+ring_sleep,day_offset,SMALLINT,nullable,SleepEntity,daysAgo,days_ago,none,BUG (key mismatch),"Android sends key ""days_ago"" but the column is ""day_offset"" — value is silently dropped. NOT NULL removed by migration 001 so inserts no longer fail; data is NULL until Android field name is fixed"
+ring_sleep,start_timestamp,BIGINT,NOT NULL,SleepEntity,startTimestamp,start_timestamp,none,OK,
+ring_sleep,end_timestamp,BIGINT,NOT NULL,SleepEntity,endTimestamp,end_timestamp,none,OK,
+ring_sleep,deep_minutes,SMALLINT,NOT NULL,SleepEntity,deepMinutes,deep_minutes,none,OK,Sum of SleepNewProtoResp stages where t=3
+ring_sleep,light_minutes,SMALLINT,NOT NULL,SleepEntity,lightMinutes,light_minutes,none,OK,Sum where t=2
+ring_sleep,rem_minutes,SMALLINT,NOT NULL,SleepEntity,remMinutes,rem_minutes,none,OK,Sum where t=4
+ring_sleep,awake_minutes,SMALLINT,NOT NULL,SleepEntity,awakeMinutes,awake_minutes,none,OK,Sum where t=5
+ring_sleep,not_worn_minutes,SMALLINT,nullable,SleepEntity,notWornMinutes,not_worn_minutes,none,OK,Sum where t=1; 0 when not present (entity stores 0 not null)
+ring_sleep,total_minutes,SMALLINT,NOT NULL,SleepEntity,totalMinutes,total_minutes,pre-computed: deep+light+rem+awake,OK,FastAPI derives this server-side; Android must compute and send it for Supabase direct - entity already stores it
+ring_sleep,waking_count,SMALLINT,nullable,SleepEntity,wakingCount,waking_count,none,OK,0 when not available from SleepDisplay path
+ring_sleep,lunch_start_timestamp,BIGINT,nullable,-,-,- not sent -,-,OK (gap),Entity does not capture nap timestamps yet; columns are nullable
+ring_sleep,lunch_end_timestamp,BIGINT,nullable,-,-,- not sent -,-,OK (gap),
+ring_sleep,sync_id,UUID,nullable,SleepEntity,syncId,sync_id,none,OK,"Format: ""sleep-{daysAgo}-{day}-{month}-{year}"""
+ring_sleep,firmware_version,VARCHAR(32),nullable,-,-,- not sent -,-,OK,
+ring_sleep,hardware_version,VARCHAR(32),nullable,-,-,- not sent -,-,OK,
+ring_sleep_stage_detail,id,UUID,NOT NULL,-,-,id,UUID.randomUUID().toString(),OK,
+ring_sleep_stage_detail,sleep_id,UUID,NOT NULL,SleepEntity,sleepId,sleep_id,none,OK,References the pre-generated UUID sent as ring_sleep.id
+ring_sleep_stage_detail,user_id,UUID,NOT NULL,-,-,user_id,authStore.userId,OK,Denormalised for query efficiency
+ring_sleep_stage_detail,stage_type,SMALLINT,nullable,-,-,- not sent -,-,BUG (missing field),Android never sends stage_type — the int from DetailBean.t is only used to derive the label string. NOT NULL removed by migration 001; value stays NULL until Android is fixed
+ring_sleep_stage_detail,stage_label,VARCHAR(16),nullable,-,-,stage,stageLabel(type): 1→not_worn 2→light 3→deep 4→rem 5→awake else→unknown,BUG (key mismatch),"Android sends key ""stage"" but the column is ""stage_label"" — value dropped. NOT NULL removed by migration 001; also: type 1 label is ""not_worn"" in Android but ""removed"" in FastAPI — inconsistent across sync paths"
+ring_sleep_stage_detail,stage_index,SMALLINT,nullable,-,-,- not sent -,-,BUG (missing field),Android never sends stage_index — no loop counter tracked in insertSleepSessions(). NOT NULL removed by migration 001; value stays NULL until Android is fixed
+ring_sleep_stage_detail,duration_minutes,SMALLINT,NOT NULL,-,-,duration_minutes,from parsed stagesJson durationMinutes field,OK,
+ring_sleep_stage_detail,start_timestamp,-,-,-,-,start_timestamp,computed: session start + cumulative offset,EXTRA,Column does not exist in ring_sleep_stage_detail model - Android sends this extra field and Supabase silently ignores it; harmless but wasteful
+ring_sleep_stage_detail,sync_id,UUID,nullable,-,-,- not sent -,-,OK,Not sent for stage rows; nullable so fine
+user_profiles,id,UUID,NOT NULL,-,-,- read only -,-,OK,Android reads user_profiles (GET) to fetch role/full_name after login; never writes to this table via PostgREST
+doctor_patient,patient_id + doctor_id,UUID,NOT NULL,-,-,patient_id + doctor_id,addDoctorLink() / removeDoctorLink(),OK,Android can POST/DELETE its own patient_id rows via RLS; admin rows require FastAPI admin endpoint

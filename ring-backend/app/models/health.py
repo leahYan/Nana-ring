@@ -192,9 +192,9 @@ class Activity(Base, TimestampMixin):
     )
     steps: Mapped[int] = mapped_column(Integer, nullable=False)                           # INT32, 0–100000
     running_steps: Mapped[int | None] = mapped_column(Integer, nullable=True)            # INT32
-    distance_meters: Mapped[int] = mapped_column(Integer, nullable=False)                # INT32, 0–200000
+    distance_meters: Mapped[int | None] = mapped_column(Integer, nullable=True)          # INT32, 0–200000; Android sends walk_distance_meters (wrong key) so this is nullable until Android is fixed
     calories_kcal: Mapped[int] = mapped_column(Integer, nullable=False)                  # INT32, SDK cal / 1000
-    active_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)        # INT32, 0–86400
+    active_duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)  # INT32, 0–86400; Android sends sport_duration_seconds (wrong key) so this is nullable until Android is fixed
     sleep_duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)  # INT32, rough figure
     days_ago: Mapped[int] = mapped_column(SmallInteger, nullable=False)                  # INT8, 0–7
 
@@ -248,7 +248,7 @@ class Sleep(Base, TimestampMixin):
     waking_count: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)        # SleepDisplay only
     lunch_start_timestamp: Mapped[int | None] = mapped_column(BigInteger, nullable=True) # nap start
     lunch_end_timestamp: Mapped[int | None] = mapped_column(BigInteger, nullable=True)   # nap end
-    day_offset: Mapped[int] = mapped_column(SmallInteger, nullable=False)                # INT8, 0–7
+    day_offset: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)          # INT8, 0–7; Android sends days_ago (wrong key) so this is nullable until Android is fixed
 
 
 # ---------------------------------------------------------------------------
@@ -274,9 +274,9 @@ class SleepStageDetail(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), nullable=False, index=True
     )
-    stage_index: Mapped[int] = mapped_column(SmallInteger, nullable=False)    # INT8, 0-based position
-    stage_type: Mapped[int] = mapped_column(SmallInteger, nullable=False)     # INT8, 0–5
-    stage_label: Mapped[str] = mapped_column(String(16), nullable=False)      # server-derived
+    stage_index: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)    # INT8, 0-based position; Android does not send this field yet
+    stage_type: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)     # INT8, 0–5; Android does not send this field yet
+    stage_label: Mapped[str | None] = mapped_column(String(16), nullable=True)      # Android sends key "stage" (wrong), not "stage_label"; nullable until Android is fixed
     duration_minutes: Mapped[int] = mapped_column(SmallInteger, nullable=False)  # INT16, 1–600
     sync_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
 

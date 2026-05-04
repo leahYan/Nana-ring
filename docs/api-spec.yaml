@@ -1,0 +1,1414 @@
+openapi: 3.1.0
+
+info:
+  title: Nana Ring — Health API
+  version: 1.0.0
+  description: |
+    ## Two data surfaces — read this first
+
+    The Android app currently uses **two separate API surfaces** that must both be treated as
+    authoritative:
+
+    | Surface | Base URL | Who uses it | Auth |
+    |---------|----------|-------------|------|
+    | FastAPI backend | `https://{vps_host}/api/v1` | Admin tooling, future clients | Bearer JWT (from Supabase Auth) |
+    | Supabase PostgREST | `https://{project_ref}.supabase.co` | Android app (current sync path) | `apikey` header + Bearer JWT |
+
+    Android bypasses the FastAPI backend entirely for data ingestion.  It posts directly to
+    Supabase PostgREST (`/rest/v1/ring_*` tables).  The FastAPI `POST /data/batch` endpoint
+    exists but has no active caller as of v1.0.
+
+    ### Common field rules (all metrics)
+    - `id` — UUID v4, **server-generated on insert**.  Android must not send this to FastAPI;
+      Android must generate and send it when posting directly to Supabase PostgREST.
+    - `user_id` — **never trusted from the client on FastAPI** (extracted from JWT).  Android
+      must include it explicitly when posting to Supabase PostgREST.
+    - `device_timestamp` — Unix milliseconds (UTC).  Must be > 0 and not more than 60 s in the
+      future (clock-skew allowance for WorkManager retries on old data).
+    - `server_timestamp` — set by server on insert, immutable, never sent by Android.
+    - `sync_id` — optional UUID v4 idempotency key.  Same `(sync_id, user_id)` → server
+      deduplicates silently.  Android suffixes derived metrics to avoid collisions:
+      `{syncId}-spo2`, `{syncId}-hrv`, `{syncId}-stress`, `{syncId}-bp`, `{syncId}-temp`.
+    - `firmware_version` / `hardware_version` — optional, max 32 chars, read from BLE
+      characteristics `CHAR_FIRMWARE_REVISION` and `CHAR_HW_REVISION`.
+
+servers:
+  - url: https://{vps_host}/api/v1
+    description: FastAPI Backend
+    variables:
+      vps_host:
+        default: api.nanaring.example.com
+        description: VPS hostname running the FastAPI service
+  - url: https://{project_ref}.supabase.co
+    description: Supabase PostgREST (Android direct sync path)
+    variables:
+      project_ref:
+        default: your-project-ref
+        description: Supabase project reference (ap-northeast-2 region)
+
+tags:
+  - name: backend-health
+    description: FastAPI liveness probe
+  - name: backend-batch
+    description: |
+      FastAPI batch-upload endpoint.  **Not currently called by Android** — Android
+      posts directly to Supabase PostgREST instead.
+  - name: backend-admin
+    description: FastAPI admin endpoints (admin JWT required)
+  - name: supabase-health
+    description: |
+      Supabase PostgREST inserts for health metrics.  **This is the active Android
+      sync path.**  Each metric type is a separate POST to its own table.
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Security schemes
+# ──────────────────────────────────────────────────────────────────────────────
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Supabase-issued JWT.  Obtained from `POST /auth/v1/token` (sign-in) or
+        `POST /auth/v1/token?grant_type=refresh_token` (refresh).  The FastAPI
+        backend verifies the signature using the Supabase JWT secret and extracts
+        `user_id` from the `sub` claim — Android never sends `user_id` to FastAPI.
+    SupabaseApiKey:
+      type: apiKey
+      in: header
+      name: apikey
+      description: |
+        Supabase anon key.  Required on every direct PostgREST request alongside
+        the Bearer JWT.  Row-Level Security (RLS) enforces `user_id = auth.uid()`
+        so the anon key alone grants no data access.
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Shared schemas
+  # ──────────────────────────────────────────────────────────────────────────
+
+  schemas:
+
+    # ── Shared base fields ─────────────────────────────────────────────────
+
+    MetricBase:
+      type: object
+      description: Fields that every Android-sent metric record must include.
+      required:
+        - device_timestamp
+      properties:
+        device_timestamp:
+          type: integer
+          format: int64
+          description: Unix ms (UTC) from the device clock.  Must be > 0 and ≤ server time + 60 s.
+          example: 1712530000000
+        sync_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Client idempotency key.  Same (sync_id, user_id) → server deduplicates.
+          example: "7f3e9a12-b4c1-4d8e-9f2a-1b3c5d7e9f01"
+        firmware_version:
+          type: string
+          maxLength: 32
+          nullable: true
+          example: "1.0.0.1"
+        hardware_version:
+          type: string
+          maxLength: 32
+          nullable: true
+          example: "HW_v2"
+
+    # ── Heart Rate ─────────────────────────────────────────────────────────
+
+    HeartRateIn:
+      allOf:
+        - $ref: '#/components/schemas/MetricBase'
+        - type: object
+          required: [bpm, source]
+          properties:
+            bpm:
+              type: integer
+              minimum: 30
+              maximum: 250
+              description: Heart rate in BPM.
+              example: 72
+            rri:
+              type: integer
+              format: int32
+              minimum: 200
+              maximum: 2000
+              nullable: true
+              description: R-to-R interval in ms.  Only available from manual measurements.
+              example: 820
+            source:
+              type: string
+              enum: [manual, continuous]
+              example: manual
+
+    HeartRateRow:
+      description: |
+        Row sent directly to Supabase `ring_heart_rate`.  Android generates `id` client-side;
+        `user_id` is the authenticated user's UUID from `authStore.userId`.
+      allOf:
+        - $ref: '#/components/schemas/HeartRateIn'
+        - type: object
+          required: [id, user_id]
+          properties:
+            id:
+              type: string
+              format: uuid
+              description: Client-generated UUID v4 row identifier.
+            user_id:
+              type: string
+              format: uuid
+              description: Authenticated user's UUID.
+
+    # ── SpO2 ──────────────────────────────────────────────────────────────
+
+    SpO2In:
+      allOf:
+        - $ref: '#/components/schemas/MetricBase'
+        - type: object
+          required: [percent, reading_type]
+          properties:
+            percent:
+              type: integer
+              minimum: 70
+              maximum: 100
+              description: Blood oxygen saturation %.
+              example: 98
+            reading_type:
+              type: string
+              enum: [manual, hourly, interval]
+              example: manual
+            interval_minutes:
+              type: integer
+              minimum: 1
+              maximum: 60
+              nullable: true
+              description: Measurement interval for interval mode only.
+            day_index:
+              type: integer
+              minimum: 0
+              maximum: 7
+              nullable: true
+              description: Day offset for interval sync (0 = today, 1 = yesterday).
+
+    SpO2Row:
+      description: Row sent directly to Supabase `ring_spo2`.
+      allOf:
+        - $ref: '#/components/schemas/SpO2In'
+        - type: object
+          required: [id, user_id]
+          properties:
+            id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+
+    # ── Blood Pressure ─────────────────────────────────────────────────────
+
+    BloodPressureIn:
+      allOf:
+        - $ref: '#/components/schemas/MetricBase'
+        - type: object
+          required: [systolic, diastolic, measurement_type]
+          properties:
+            systolic:
+              type: integer
+              minimum: 60
+              maximum: 250
+              description: Systolic mmHg.  NOTE — ring derives BP from HR signal, not optical.
+              example: 120
+            diastolic:
+              type: integer
+              minimum: 40
+              maximum: 150
+              description: Diastolic mmHg.  Must be strictly less than systolic.
+              example: 80
+            heart_rate_used:
+              type: integer
+              minimum: 30
+              maximum: 250
+              nullable: true
+              description: HR value fed into the SDK BP formula.  Stored for auditability.
+              example: 72
+            measurement_type:
+              type: string
+              enum: [manual_ring, auto_hourly]
+              example: manual_ring
+
+    BloodPressureRow:
+      description: Row sent directly to Supabase `ring_blood_pressure`.
+      allOf:
+        - $ref: '#/components/schemas/BloodPressureIn'
+        - type: object
+          required: [id, user_id]
+          properties:
+            id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+
+    # ── Temperature ────────────────────────────────────────────────────────
+
+    TemperatureIn:
+      allOf:
+        - $ref: '#/components/schemas/MetricBase'
+        - type: object
+          required: [celsius_primary, measurement_mode]
+          properties:
+            celsius_primary:
+              type: number
+              format: float
+              minimum: 30.0
+              maximum: 45.0
+              example: 36.6
+            celsius_side1:
+              type: number
+              format: float
+              minimum: 30.0
+              maximum: 45.0
+              nullable: true
+              example: 36.4
+            celsius_side2:
+              type: number
+              format: float
+              minimum: 30.0
+              maximum: 45.0
+              nullable: true
+              example: 36.5
+            measurement_mode:
+              type: string
+              enum: [manual_once, auto_series, three_point, interval, one_click]
+              example: auto_series
+            time_span_minutes:
+              type: integer
+              minimum: 1
+              maximum: 120
+              nullable: true
+              description: Interval between readings for auto_series mode.
+            day_index:
+              type: integer
+              minimum: 0
+              maximum: 7
+              nullable: true
+
+    TemperatureRow:
+      description: Row sent directly to Supabase `ring_temperature`.
+      allOf:
+        - $ref: '#/components/schemas/TemperatureIn'
+        - type: object
+          required: [id, user_id]
+          properties:
+            id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+
+    # ── HRV ───────────────────────────────────────────────────────────────
+
+    HRVIn:
+      allOf:
+        - $ref: '#/components/schemas/MetricBase'
+        - type: object
+          required: [ms, source]
+          properties:
+            ms:
+              type: integer
+              minimum: 1
+              maximum: 300
+              description: RMSSD in ms.
+              example: 45
+            interval_minutes:
+              type: integer
+              minimum: 1
+              nullable: true
+              description: Measurement interval for synced history (typically 30).
+            day_offset:
+              type: integer
+              minimum: 0
+              maximum: 6
+              nullable: true
+              description: Day offset (0 = today, 6 = 6 days ago).
+            source:
+              type: string
+              enum: [manual, continuous]
+
+    HRVRow:
+      description: Row sent directly to Supabase `ring_hrv`.
+      allOf:
+        - $ref: '#/components/schemas/HRVIn'
+        - type: object
+          required: [id, user_id]
+          properties:
+            id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+
+    # ── Stress ────────────────────────────────────────────────────────────
+
+    StressIn:
+      allOf:
+        - $ref: '#/components/schemas/MetricBase'
+        - type: object
+          required: [level, source]
+          properties:
+            level:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: Stress/pressure index 0–100.
+              example: 42
+            interval_minutes:
+              type: integer
+              minimum: 1
+              nullable: true
+              description: Measurement interval for synced history (typically 30).
+            day_offset:
+              type: integer
+              minimum: 0
+              maximum: 6
+              nullable: true
+            source:
+              type: string
+              enum: [manual, continuous]
+
+    StressRow:
+      description: Row sent directly to Supabase `ring_stress`.
+      allOf:
+        - $ref: '#/components/schemas/StressIn'
+        - type: object
+          required: [id, user_id]
+          properties:
+            id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+
+    # ── Activity ──────────────────────────────────────────────────────────
+
+    ActivityIn:
+      allOf:
+        - $ref: '#/components/schemas/MetricBase'
+        - type: object
+          required: [steps, distance_meters, calories_kcal, active_duration_seconds, days_ago]
+          properties:
+            steps:
+              type: integer
+              minimum: 0
+              maximum: 100000
+              example: 8432
+            running_steps:
+              type: integer
+              minimum: 0
+              nullable: true
+              description: Aerobic/running step subset of total.  Must be ≤ steps.
+              example: 1200
+            distance_meters:
+              type: integer
+              minimum: 0
+              maximum: 200000
+              example: 6100
+            calories_kcal:
+              type: integer
+              minimum: 0
+              maximum: 10000
+              description: |
+                Calories burned in kcal.  Android must divide `BleStepTotal.calorie` (small cal)
+                by 1000 before sending.
+              example: 420
+            active_duration_seconds:
+              type: integer
+              minimum: 0
+              maximum: 86400
+              description: Time in active movement for the day in seconds.
+              example: 3600
+            sleep_duration_seconds:
+              type: integer
+              minimum: 0
+              maximum: 86400
+              nullable: true
+              description: Rough sleep figure from activity summary (not the detailed sleep record).
+            days_ago:
+              type: integer
+              minimum: 0
+              maximum: 7
+              description: How many days ago relative to sync time.  0 = today.
+
+    ActivityRow:
+      description: Row sent directly to Supabase `ring_activity`.
+      allOf:
+        - $ref: '#/components/schemas/ActivityIn'
+        - type: object
+          required: [id, user_id]
+          properties:
+            id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+
+    # ── Activity Detail (15-minute windows) ────────────────────────────────
+
+    ActivityDetailIn:
+      type: object
+      required: [device_timestamp, time_index, walk_steps, distance_meters, calories_small_cal, day_offset]
+      properties:
+        device_timestamp:
+          type: integer
+          format: int64
+          description: Start of the 15-minute window (Unix ms UTC).  Derived as date midnight + timeIndex * 15 * 60 * 1000.
+        sync_id:
+          type: string
+          format: uuid
+          nullable: true
+        time_index:
+          type: integer
+          minimum: 0
+          maximum: 95
+          description: 15-minute slot index within the day.  0 = 00:00–00:15, 95 = 23:45–00:00.
+          example: 32
+        walk_steps:
+          type: integer
+          minimum: 0
+          maximum: 5000
+          example: 240
+        run_steps:
+          type: integer
+          minimum: 0
+          maximum: 5000
+          nullable: true
+          description: Running step count in this window (SDK field noted as provisional).
+        distance_meters:
+          type: integer
+          minimum: 0
+          maximum: 10000
+          example: 180
+        calories_small_cal:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          description: Calories in **small calories** (cal), NOT kcal.  Store raw SDK value.
+          example: 12
+        day_offset:
+          type: integer
+          minimum: 0
+          maximum: 7
+          description: Relative day offset used during sync.  0 = today.
+
+    ActivityDetailRow:
+      description: Row sent directly to Supabase `ring_activity_detail`.
+      allOf:
+        - $ref: '#/components/schemas/ActivityDetailIn'
+        - type: object
+          required: [id, user_id]
+          properties:
+            id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+
+    # ── Sleep Stage Detail (embedded) ──────────────────────────────────────
+
+    SleepStageIn:
+      type: object
+      required: [stage_index, stage_type, duration_minutes]
+      properties:
+        stage_index:
+          type: integer
+          minimum: 0
+          maximum: 500
+          description: Sequential position within the sleep session (0-based).
+        stage_type:
+          type: integer
+          enum: [0, 1, 2, 3, 4, 5]
+          description: |
+            SDK stage type code:
+            - `0` — not sleeping
+            - `1` — ring removed
+            - `2` — light sleep
+            - `3` — deep sleep
+            - `4` — REM (eye movement)
+            - `5` — awake
+        duration_minutes:
+          type: integer
+          minimum: 1
+          maximum: 600
+        sync_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    SleepStageRow:
+      description: |
+        Child row for Supabase `ring_sleep_stage_detail`.  Android inserts each stage separately
+        after inserting the parent `ring_sleep` row.  `sleep_id` is the parent row's UUID.
+        `stage_label` is server-derived (FastAPI) or must be set by Android (Supabase direct):
+        0→none, 1→removed, 2→light, 3→deep, 4→rem, 5→awake.
+      allOf:
+        - $ref: '#/components/schemas/SleepStageIn'
+        - type: object
+          required: [id, sleep_id, user_id, stage_label]
+          properties:
+            id:
+              type: string
+              format: uuid
+            sleep_id:
+              type: string
+              format: uuid
+              description: FK to the parent `ring_sleep.id`.
+            user_id:
+              type: string
+              format: uuid
+            stage_label:
+              type: string
+              enum: [none, removed, light, deep, rem, awake]
+              description: Human-readable label mapped from stage_type.
+
+    # ── Sleep ─────────────────────────────────────────────────────────────
+
+    SleepIn:
+      allOf:
+        - $ref: '#/components/schemas/MetricBase'
+        - type: object
+          required: [start_timestamp, end_timestamp, deep_minutes, light_minutes, rem_minutes, awake_minutes, day_offset]
+          properties:
+            start_timestamp:
+              type: integer
+              format: int64
+              description: Sleep session start — `SleepNewProtoResp.st * 1000` (Unix ms).
+            end_timestamp:
+              type: integer
+              format: int64
+              description: Sleep session end — `SleepNewProtoResp.et * 1000`.  Must be > start_timestamp.  Max 24 h span.
+            deep_minutes:
+              type: integer
+              minimum: 0
+              maximum: 600
+              description: Sum of stage segments where stage_type = 3.
+            light_minutes:
+              type: integer
+              minimum: 0
+              maximum: 600
+              description: Sum of stage segments where stage_type = 2.
+            rem_minutes:
+              type: integer
+              minimum: 0
+              maximum: 300
+              description: Sum of stage segments where stage_type = 4.
+            awake_minutes:
+              type: integer
+              minimum: 0
+              maximum: 300
+              description: Sum of stage segments where stage_type = 5.
+            not_worn_minutes:
+              type: integer
+              minimum: 0
+              maximum: 600
+              nullable: true
+              description: Minutes ring was removed (stage_type = 1).  Null if none.
+            waking_count:
+              type: integer
+              minimum: 0
+              maximum: 50
+              nullable: true
+              description: Wake events from `SleepDisplay.wakingCount`.  Null if using SleepNewProtoResp path only.
+            lunch_start_timestamp:
+              type: integer
+              format: int64
+              nullable: true
+              description: Nap start — `SleepNewProtoResp.lunchSt * 1000`.  Null if no nap.
+            lunch_end_timestamp:
+              type: integer
+              format: int64
+              nullable: true
+              description: Nap end — `SleepNewProtoResp.lunchEt * 1000`.  Null if no nap.
+            day_offset:
+              type: integer
+              minimum: 0
+              maximum: 7
+              description: Relative day offset used during sync.  0 = last night.
+            stages:
+              type: array
+              items:
+                $ref: '#/components/schemas/SleepStageIn'
+              description: |
+                Embedded stage detail.  FastAPI extracts these and inserts into
+                `ring_sleep_stage_detail` automatically.  When posting directly to Supabase,
+                Android must insert stage rows separately after the parent sleep row.
+
+    SleepRow:
+      description: |
+        Row sent directly to Supabase `ring_sleep`.  `total_minutes` is server-derived on
+        FastAPI (deep + light + rem + awake); Android must compute and include it when posting
+        directly to Supabase.
+      allOf:
+        - $ref: '#/components/schemas/SleepIn'
+        - type: object
+          required: [id, user_id, total_minutes]
+          properties:
+            id:
+              type: string
+              format: uuid
+              description: Client-generated UUID — used as FK in `ring_sleep_stage_detail`.
+            user_id:
+              type: string
+              format: uuid
+            total_minutes:
+              type: integer
+              description: deep + light + rem + awake.  Server computes this on FastAPI; Android must set it for Supabase direct.
+
+    # ── FastAPI batch request / response ───────────────────────────────────
+
+    BatchUploadRequest:
+      type: object
+      description: |
+        Send whichever metric lists have new data.  Empty lists are fine.
+        All metrics share the `_MetricBase` fields.  `user_id` is extracted from the JWT —
+        Android must not include it.
+      properties:
+        heart_rate:
+          type: array
+          items:
+            $ref: '#/components/schemas/HeartRateIn'
+          default: []
+        spo2:
+          type: array
+          items:
+            $ref: '#/components/schemas/SpO2In'
+          default: []
+        blood_pressure:
+          type: array
+          items:
+            $ref: '#/components/schemas/BloodPressureIn'
+          default: []
+        temperature:
+          type: array
+          items:
+            $ref: '#/components/schemas/TemperatureIn'
+          default: []
+        hrv:
+          type: array
+          items:
+            $ref: '#/components/schemas/HRVIn'
+          default: []
+        stress:
+          type: array
+          items:
+            $ref: '#/components/schemas/StressIn'
+          default: []
+        activity:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActivityIn'
+          default: []
+        activity_detail:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActivityDetailIn'
+          default: []
+        sleep:
+          type: array
+          items:
+            $ref: '#/components/schemas/SleepIn'
+          default: []
+          description: Sleep sessions with embedded `stages[]`.  Server splits stages into `ring_sleep_stage_detail`.
+
+    BatchUploadResponse:
+      type: object
+      required: [received, inserted, skipped, errors]
+      properties:
+        received:
+          type: integer
+          description: Total record count across all metric lists.
+        inserted:
+          type: integer
+        skipped:
+          type: integer
+          description: Records with a duplicate (sync_id, user_id) — silently ignored.
+        errors:
+          type: array
+          items:
+            type: string
+          description: Per-record error strings.  Non-empty means a partial failure.
+
+    # ── Admin schemas ──────────────────────────────────────────────────────
+
+    DoctorPatientLink:
+      type: object
+      required: [doctor_id, patient_id]
+      properties:
+        doctor_id:
+          type: string
+          format: uuid
+        patient_id:
+          type: string
+          format: uuid
+
+    UserProfileOut:
+      type: object
+      required: [id, role, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [patient, doctor, admin]
+        full_name:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    UserRoleUpdate:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [patient, doctor, admin]
+
+    DoctorPatientLinkOut:
+      type: object
+      required: [id, doctor_id, patient_id, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        doctor_id:
+          type: string
+          format: uuid
+        patient_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Reusable responses
+  # ──────────────────────────────────────────────────────────────────────────
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid Bearer JWT.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              detail:
+                type: string
+                example: "Not authenticated"
+    Forbidden:
+      description: Valid JWT but insufficient role (admin required).
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              detail:
+                type: string
+                example: "Admin access required"
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              detail:
+                type: string
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Paths — FastAPI Backend
+# ──────────────────────────────────────────────────────────────────────────────
+
+paths:
+
+  /health:
+    servers:
+      - url: https://{vps_host}/api/v1
+        variables:
+          vps_host:
+            default: api.nanaring.example.com
+    get:
+      tags: [backend-health]
+      operationId: healthCheck
+      summary: Liveness probe
+      description: Public endpoint — no auth required.  Used by Docker HEALTHCHECK and nginx upstream.
+      responses:
+        '200':
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "Ring Health API is live"
+
+  /data/batch:
+    servers:
+      - url: https://{vps_host}/api/v1
+        variables:
+          vps_host:
+            default: api.nanaring.example.com
+    post:
+      tags: [backend-batch]
+      operationId: batchUpload
+      summary: Batch-upload health metrics (FastAPI)
+      description: |
+        Accepts up to 9 metric lists in a single JSON body.  Send whichever tables have new
+        data; empty lists are ignored.
+
+        **Current status:** FastAPI endpoint exists but Android posts directly to Supabase
+        PostgREST instead (`/rest/v1/ring_*`).  This endpoint is available for future clients
+        or if Android sync is migrated to the backend.
+
+        ### Multi-tenancy
+        `user_id` is extracted from the JWT `sub` claim — never from the request body.
+
+        ### Idempotency
+        Records with a matching `(sync_id, user_id)` already in the database are silently
+        skipped.  Records without a `sync_id` are always inserted.
+
+        ### Partial failures
+        Returns 207 regardless of per-record errors.  Check `errors[]` to detect partial
+        failures without a 4xx/5xx.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchUploadRequest'
+            example:
+              heart_rate:
+                - device_timestamp: 1712530000000
+                  bpm: 72
+                  source: manual
+                  sync_id: "7f3e9a12-b4c1-4d8e-9f2a-1b3c5d7e9f01"
+                  firmware_version: "1.0.0.1"
+              sleep:
+                - device_timestamp: 1712480000000
+                  start_timestamp: 1712480000000
+                  end_timestamp: 1712509200000
+                  deep_minutes: 90
+                  light_minutes: 240
+                  rem_minutes: 80
+                  awake_minutes: 42
+                  day_offset: 0
+                  stages:
+                    - stage_index: 0
+                      stage_type: 2
+                      duration_minutes: 60
+                    - stage_index: 1
+                      stage_type: 3
+                      duration_minutes: 90
+      responses:
+        '207':
+          description: Multi-Status — always returned.  Check `errors[]` for partial failures.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchUploadResponse'
+              example:
+                received: 2
+                inserted: 2
+                skipped: 0
+                errors: []
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          description: Database commit failed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+
+  /admin/doctor-patient:
+    servers:
+      - url: https://{vps_host}/api/v1
+        variables:
+          vps_host:
+            default: api.nanaring.example.com
+    post:
+      tags: [backend-admin]
+      operationId: linkDoctorPatient
+      summary: Link a doctor to a patient
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DoctorPatientLink'
+      responses:
+        '201':
+          description: Linked (or already existed).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                  doctor_id:
+                    type: string
+                    format: uuid
+                  patient_id:
+                    type: string
+                    format: uuid
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [backend-admin]
+      operationId: unlinkDoctorPatient
+      summary: Unlink a doctor from a patient
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DoctorPatientLink'
+      responses:
+        '200':
+          description: Unlinked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    get:
+      tags: [backend-admin]
+      operationId: listDoctorPatientLinks
+      summary: List all doctor-patient links
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: All links.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DoctorPatientLinkOut'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/users:
+    servers:
+      - url: https://{vps_host}/api/v1
+        variables:
+          vps_host:
+            default: api.nanaring.example.com
+    get:
+      tags: [backend-admin]
+      operationId: listUsers
+      summary: List all users with their roles
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: All user profiles.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UserProfileOut'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/users/{user_id}:
+    servers:
+      - url: https://{vps_host}/api/v1
+        variables:
+          vps_host:
+            default: api.nanaring.example.com
+    patch:
+      tags: [backend-admin]
+      operationId: updateUserRole
+      summary: Update a user's role
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRoleUpdate'
+      responses:
+        '200':
+          description: Role updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                  user_id:
+                    type: string
+                    format: uuid
+                  role:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: Invalid role value.
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Paths — Supabase PostgREST (Android direct sync)
+# ──────────────────────────────────────────────────────────────────────────────
+# Auth on every request:
+#   Header  apikey: <anon_key>
+#   Header  Authorization: Bearer <access_token>
+#   Header  Prefer: resolution=ignore-duplicates   (for idempotent retries)
+#   Header  Content-Type: application/json
+# RLS enforces user_id = auth.uid() — anon key alone grants no data access.
+# ──────────────────────────────────────────────────────────────────────────────
+
+  /rest/v1/ring_heart_rate:
+    servers:
+      - url: https://{project_ref}.supabase.co
+        variables:
+          project_ref:
+            default: your-project-ref
+    post:
+      tags: [supabase-health]
+      operationId: supabaseInsertHeartRate
+      summary: Insert heart rate rows (Android sync)
+      description: |
+        Android posts an array of heart rate records directly to Supabase PostgREST.
+
+        **Required headers:**
+        - `apikey: <anon_key>`
+        - `Authorization: Bearer <access_token>`
+        - `Prefer: resolution=ignore-duplicates` — prevents duplicates on WorkManager retry
+        - `Content-Type: application/json`
+
+        Android generates `id` client-side.  `user_id` must be the authenticated user's UUID
+        from `authStore.userId`.  RLS rejects rows where `user_id ≠ auth.uid()`.
+      security:
+        - BearerAuth: []
+        - SupabaseApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/HeartRateRow'
+      responses:
+        '201':
+          description: Inserted (or ignored if duplicate).
+        '401':
+          description: Missing or invalid credentials.
+
+  /rest/v1/ring_spo2:
+    servers:
+      - url: https://{project_ref}.supabase.co
+        variables:
+          project_ref:
+            default: your-project-ref
+    post:
+      tags: [supabase-health]
+      operationId: supabaseInsertSpO2
+      summary: Insert SpO2 rows (Android sync)
+      description: |
+        Android derives SpO2 from `HeartRateEntity.spO2`.  `sync_id` is suffixed with `-spo2`
+        to avoid collision with the heart-rate row from the same measurement.
+        `reading_type` is always `"manual"` for current sync path.
+      security:
+        - BearerAuth: []
+        - SupabaseApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/SpO2Row'
+      responses:
+        '201':
+          description: Inserted.
+        '401':
+          description: Missing or invalid credentials.
+
+  /rest/v1/ring_blood_pressure:
+    servers:
+      - url: https://{project_ref}.supabase.co
+        variables:
+          project_ref:
+            default: your-project-ref
+    post:
+      tags: [supabase-health]
+      operationId: supabaseInsertBloodPressure
+      summary: Insert blood pressure rows (Android sync)
+      description: |
+        `sync_id` suffixed with `-bp`.
+        NOTE — ring does not measure BP optically; systolic/diastolic are SDK-derived from
+        the HR signal via `CalcBloodPressureByHeart`.  UI must disclose this.
+      security:
+        - BearerAuth: []
+        - SupabaseApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/BloodPressureRow'
+      responses:
+        '201':
+          description: Inserted.
+        '401':
+          description: Missing or invalid credentials.
+
+  /rest/v1/ring_temperature:
+    servers:
+      - url: https://{project_ref}.supabase.co
+        variables:
+          project_ref:
+            default: your-project-ref
+    post:
+      tags: [supabase-health]
+      operationId: supabaseInsertTemperature
+      summary: Insert temperature rows (Android sync)
+      description: |
+        `sync_id` suffixed with `-temp`.
+        `StopHeartRateRsp.temperature` (int) must be divided by 100.0 for `one_click` mode.
+      security:
+        - BearerAuth: []
+        - SupabaseApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/TemperatureRow'
+      responses:
+        '201':
+          description: Inserted.
+        '401':
+          description: Missing or invalid credentials.
+
+  /rest/v1/ring_hrv:
+    servers:
+      - url: https://{project_ref}.supabase.co
+        variables:
+          project_ref:
+            default: your-project-ref
+    post:
+      tags: [supabase-health]
+      operationId: supabaseInsertHRV
+      summary: Insert HRV rows (Android sync)
+      description: |
+        `sync_id` suffixed with `-hrv`.
+        For synced history: `HRVRsp.pressureArray` is a byte array — divide each element by 10
+        for the actual ms value.
+      security:
+        - BearerAuth: []
+        - SupabaseApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/HRVRow'
+      responses:
+        '201':
+          description: Inserted.
+        '401':
+          description: Missing or invalid credentials.
+
+  /rest/v1/ring_stress:
+    servers:
+      - url: https://{project_ref}.supabase.co
+        variables:
+          project_ref:
+            default: your-project-ref
+    post:
+      tags: [supabase-health]
+      operationId: supabaseInsertStress
+      summary: Insert stress rows (Android sync)
+      description: |
+        `sync_id` suffixed with `-stress`.
+        For synced history: `PressureRsp.pressureArray` byte array — divide each element by 10.
+      security:
+        - BearerAuth: []
+        - SupabaseApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/StressRow'
+      responses:
+        '201':
+          description: Inserted.
+        '401':
+          description: Missing or invalid credentials.
+
+  /rest/v1/ring_activity:
+    servers:
+      - url: https://{project_ref}.supabase.co
+        variables:
+          project_ref:
+            default: your-project-ref
+    post:
+      tags: [supabase-health]
+      operationId: supabaseInsertActivity
+      summary: Insert daily activity summary rows (Android sync)
+      description: |
+        One row per calendar day.  `BleStepTotal.calorie` is in small calories — Android must
+        divide by 1000 before setting `calories_kcal`.
+      security:
+        - BearerAuth: []
+        - SupabaseApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/ActivityRow'
+      responses:
+        '201':
+          description: Inserted.
+        '401':
+          description: Missing or invalid credentials.
+
+  /rest/v1/ring_sleep:
+    servers:
+      - url: https://{project_ref}.supabase.co
+        variables:
+          project_ref:
+            default: your-project-ref
+    post:
+      tags: [supabase-health]
+      operationId: supabaseInsertSleep
+      summary: Insert sleep session rows (Android sync)
+      description: |
+        Android inserts the parent sleep row first.  The UUID used for `id` is then referenced
+        as `sleep_id` in each stage row posted to `/rest/v1/ring_sleep_stage_detail`.
+
+        Unlike the FastAPI batch endpoint (which derives `total_minutes` server-side), Android
+        must compute and include `total_minutes = deep + light + rem + awake` when posting
+        directly to Supabase.
+      security:
+        - BearerAuth: []
+        - SupabaseApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/SleepRow'
+      responses:
+        '201':
+          description: Inserted.
+        '401':
+          description: Missing or invalid credentials.
+
+  /rest/v1/ring_sleep_stage_detail:
+    servers:
+      - url: https://{project_ref}.supabase.co
+        variables:
+          project_ref:
+            default: your-project-ref
+    post:
+      tags: [supabase-health]
+      operationId: supabaseInsertSleepStages
+      summary: Insert sleep stage detail rows (Android sync)
+      description: |
+        Posted **after** the parent `/rest/v1/ring_sleep` insert.  Each row references the
+        parent via `sleep_id`.  Android must populate `stage_label` (the FastAPI backend does
+        this automatically; Supabase PostgREST does not):
+        0→none, 1→removed, 2→light, 3→deep, 4→rem, 5→awake.
+      security:
+        - BearerAuth: []
+        - SupabaseApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/SleepStageRow'
+      responses:
+        '201':
+          description: Inserted.
+        '401':
+          description: Missing or invalid credentials.

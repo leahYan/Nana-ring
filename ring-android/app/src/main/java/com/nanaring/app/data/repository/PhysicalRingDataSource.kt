@@ -286,9 +286,9 @@ class PhysicalRingDataSource(
 
         startRawBleScan()
 
-        // Stop scan after 10 s and publish results — colmi_r02_client uses the same approach.
+        // Stop scan after 20 s — gives slow-to-advertise rings more time.
         scanTimeoutJob = scope.launch {
-            delay(10_000)
+            delay(20_000)
             finishScan()
         }
     }
@@ -426,6 +426,13 @@ class PhysicalRingDataSource(
                         return
                     }
                     Log.d("BLE_DEBUG", "StopHeartRateRsp raw — errCode=${hr.errCode} heart=${hr.heart} spO2=${hr.bloodOxygen} bp=${hr.sbp}/${hr.dbp} hrv=${hr.hrv} stress=${hr.stress} temp=${hr.temperature}")
+                    if (isMeasuring) {
+                        // Sequential or oneClick measurement in progress — the measurement
+                        // path handles its own insert. Skip here to avoid a premature
+                        // insert with zero SpO2/HRV/temp (fires after manualModeHeart stops).
+                        Log.d("BLE_DEBUG", "CMD_STOP_HEART_RATE during active measurement — skipped")
+                        return
+                    }
                     if (hr.errCode.toInt() == 0 && hr.heart > 0) {
                         onMeasurementComplete(hr)
                     } else {
@@ -611,7 +618,7 @@ class PhysicalRingDataSource(
                 )
                 refreshRecentReadings()
                 WorkManager.getInstance(context).enqueueUniqueWork(
-                    "ring_sync",
+                    "ring_sync_immediate",
                     ExistingWorkPolicy.KEEP,
                     OneTimeWorkRequestBuilder<SyncWorker>().build(),
                 )
@@ -654,7 +661,7 @@ class PhysicalRingDataSource(
             readActivityHistory()
             readSleepHistory()
             WorkManager.getInstance(context).enqueueUniqueWork(
-                "ring_sync",
+                "ring_sync_immediate",
                 ExistingWorkPolicy.KEEP,
                 OneTimeWorkRequestBuilder<SyncWorker>().build(),
             )
@@ -863,7 +870,7 @@ class PhysicalRingDataSource(
             // Enqueue sync immediately after insert — deduplicated so rapid measurements
             // don't stack up multiple workers.
             WorkManager.getInstance(context).enqueueUniqueWork(
-                "ring_sync",
+                "ring_sync_immediate",
                 ExistingWorkPolicy.KEEP,
                 OneTimeWorkRequestBuilder<SyncWorker>().build(),
             )
